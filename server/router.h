@@ -27,6 +27,10 @@ struct NativeMessage {
     json data;
 };
 
+inline bool operator==(const NativeMessage &lhs, const NativeMessage &rhs) {
+    return lhs.id == rhs.id && lhs.method == rhs.method && lhs.accessToken == rhs.accessToken && lhs.data == rhs.data;
+}
+
 router::Response serve(string path);
 router::NativeMessage executeNativeMethod(const router::NativeMessage &request);
 router::Response getAsset(string path, const string &prependData = "");
