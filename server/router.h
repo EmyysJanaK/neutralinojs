@@ -27,6 +27,12 @@ struct NativeMessage {
     json data;
 };
 
+struct NativeMessageHash {
+    size_t operator()(const NativeMessage &msg) const {
+        return hash<string>()(msg.id) ^ hash<string>()(msg.method) ^ hash<string>()(msg.accessToken) ^ hash<string>()(msg.data.dump());
+    }
+};
+
 inline bool operator==(const NativeMessage &lhs, const NativeMessage &rhs) {
     return lhs.id == rhs.id && lhs.method == rhs.method && lhs.accessToken == rhs.accessToken && lhs.data == rhs.data;
 }
