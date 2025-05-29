@@ -6,6 +6,7 @@
 #include <websocketpp/server.hpp>
 
 #include "lib/json/json.hpp"
+#include "errors.h"
 
 using namespace std;
 using json = nlohmann::json;
@@ -41,6 +42,10 @@ router::Response serve(string path);
 router::NativeMessage executeNativeMethod(const router::NativeMessage &request);
 router::Response getAsset(string path, const string &prependData = "");
 map<string, router::NativeMethod> getMethodMap();
+errors::StatusCode mountPath(string &path, string &target);
+bool isMounted(const string &path);
+bool unmountPath(string &path);
+map<string, string> getMounts();
 
 } // namespace router
 

@@ -2,6 +2,7 @@
 #define NEU_OS_H
 
 #include <string>
+#include <functional>
 
 #include "lib/json/json.hpp"
 
@@ -23,11 +24,21 @@ struct SpawnedProcessEvent {
     string stdIn = "";
 };
 
+struct ChildProcessOptions {
+    bool background = false;
+    bool events = true;
+    string cwd = "";
+    string stdIn = "";
+    map<string, string> envs;
+    function<void(const char *bytes, size_t n)> stdOutHandler;
+    function<void(const char *bytes, size_t n)> stdErrHandler;
+};
+
 bool isTrayInitialized();
 void cleanupTray();
 void open(const string &url);
-os::CommandResult execCommand(string command, const string &input = "", bool background = false, const string &cwd = "");
-pair<int, int> spawnProcess(string command, const string &cwd = "");
+os::CommandResult execCommand(string command, const os::ChildProcessOptions &options = {});
+pair<int, int> spawnProcess(string command, const os::ChildProcessOptions &options = {});
 bool updateSpawnedProcess(const os::SpawnedProcessEvent &evt);
 string getPath(const string &name);
 string getEnv(const string &key);

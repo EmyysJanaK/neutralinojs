@@ -6,6 +6,7 @@
 #include <vector>
 #include <map>
 #include <set>
+#include <clocale>
 
 #include "lib/json/json.hpp"
 #include "settings.h"
@@ -20,6 +21,8 @@
 #include "api/window/window.h"
 #include "api/computer/computer.h"
 
+#include "lib/platformfolders/platform_folders.h"
+
 using namespace std;
 using json = nlohmann::json;
 
@@ -28,12 +31,23 @@ namespace settings {
 json options;
 json globalArgs;
 string appPath;
+string systemDataPath;
+string appDataPath; // appPath or systemDataPath based on config.dataLocation
 string configFile = NEU_APP_CONFIG_FILE;
+string localeName;
 
 vector<settings::ConfigOverride> configOverrides;
 
 string joinAppPath(const string &filename) {
     return appPath + filename;
+}
+
+string joinAppDataPath(const string &filename) {
+    return appDataPath + filename;
+}
+
+string joinSystemDataPath(const string &filename) {
+    return systemDataPath + filename;
 }
 
 string getAppPath() {
@@ -45,6 +59,11 @@ string getConfigFile() {
 }
 
 bool init() {
+    #if defined(_WIN32)
+    localeName = helpers::wstr2str(_wsetlocale(LC_ALL, L""));
+    #else
+    localeName = setlocale(LC_ALL, "");
+    #endif
     options = json::object();
     json config;
     fs::FileReaderResult fileReaderResult = resources::getFile(configFile);
@@ -89,6 +108,17 @@ bool init() {
         options = options.patch(patches);
     }
 
+    systemDataPath = sago::getDataHome() + "/" + settings::getAppId();
+    systemDataPath = helpers::normalizePath(systemDataPath);
+
+    string dataLoc = "app";
+    json jLoc = settings::getOptionForCurrentMode("dataLocation");
+    if(!jLoc.is_null()) {
+        dataLoc = jLoc.get<string>();
+    }
+    
+    appDataPath = dataLoc == "system" ? systemDataPath : appPath;
+
     return true;
 }
 
@@ -97,8 +127,12 @@ json getConfig() {
 }
 
 string getAppId() {
-    return !options["applicationId"].is_null() ?
-        options["applicationId"].get<string>() : "js.neutralino.framework";
+    if(!options["applicationId"].is_null()) {
+        string appId = options["applicationId"].get<string>();
+        appId = regex_replace(appId, regex("[^\\w.]"), "");
+        return regex_replace(appId, regex("[.]{2,}"), ".");
+    }
+    return "js.neutralino.framework";
 }
 
 string getNavigationUrl() {
@@ -119,19 +153,22 @@ string getGlobalVars(){
     jsSnippet += "var NL_MODE='" + helpers::appModeToStr(settings::getMode()) + "';";
     jsSnippet += "var NL_TOKEN='" + authbasic::getToken() + "';";
     jsSnippet += "var NL_CWD='" + fs::getCurrentDirectory() + "';";
-    jsSnippet += "var NL_ARGS=" + globalArgs.dump() + ";";
+    jsSnippet += "var NL_ARGS=" + helpers::jsonToString(globalArgs) + ";";
     jsSnippet += "var NL_PATH='" + appPath + "';";
+    jsSnippet += "var NL_DATAPATH='" + appDataPath + "';";
     jsSnippet += "var NL_PID=" + to_string(app::getProcessId()) + ";";
     jsSnippet += "var NL_RESMODE='" + resources::getModeString() + "';";
-    jsSnippet += "var NL_EXTENABLED=" + json(extensions::isInitialized()).dump() + ";";
-    jsSnippet += "var NL_CMETHODS=" + json(custom::getMethods()).dump() + ";";
-    jsSnippet += "var NL_WSAVSTLOADED=" + json(window::isSavedStateLoaded()).dump() + ";";
+    jsSnippet += "var NL_EXTENABLED=" + helpers::jsonToString(json(extensions::isInitialized())) + ";";
+    jsSnippet += "var NL_CMETHODS=" + helpers::jsonToString(json(custom::getMethods())) + ";";
+    jsSnippet += "var NL_WSAVSTLOADED=" + helpers::jsonToString(json(window::isSavedStateLoaded())) + ";";
     jsSnippet += "var NL_CONFIGFILE='" + settings::getConfigFile() + "';";
+    jsSnippet += "var NL_LOCALE='" + localeName + "';";
+    jsSnippet += "var NL_COMPDATA='" + string(NEU_COMPILATION_DATA) + "';";
 
     json jGlobalVariables = settings::getOptionForCurrentMode("globalVariables");
     if(!jGlobalVariables.is_null()) {
         for(const auto &it: jGlobalVariables.items()) {
-            jsSnippet += "var NL_" + it.key() +  "=JSON.parse('" + it.value().dump() + "');";
+            jsSnippet += "var NL_" + it.key() +  "=JSON.parse('" + helpers::jsonToString(it.value()) + "');";
         }
     }
     return jsSnippet;
@@ -183,7 +220,7 @@ void setGlobalArgs(const json &args) {
 
         // Enable dev tools connection (as an extension)
         // Not available for production (resources.neu-based) apps
-        if(cliArg.key == "--neu-dev-extension" && resources::isBundleMode()) {
+        if(cliArg.key == "--neu-dev-extension" && !resources::isBundleMode()) {
             extensions::loadOne("js.neutralino.devtools");
             continue;
         }
@@ -228,6 +265,7 @@ void applyConfigOverride(const settings::CliArg &arg) {
         {"--single-page-serve", {"/singlePageServe", "bool"}},
         {"--enable-extensions", {"/enableExtensions", "bool"}},
         {"--export-auth-info", {"/exportAuthInfo", "bool"}},
+        {"--data-location", {"/dataLocation", "string"}},
         {"--storage-location", {"/storageLocation", "string"}},
         // Window mode
         {"--window-title", {"/modes/window/title", "string"}},
@@ -253,6 +291,9 @@ void applyConfigOverride(const settings::CliArg &arg) {
         {"--window-use-saved-state", {"/modes/window/useSavedState", "bool"}},
         {"--window-icon", {"/modes/window/icon", "string"}},
         {"--window-extend-user-agent-with", {"/modes/window/extendUserAgentWith", "string"}},
+        {"--window-inject-globals", {"/modes/window/injectGlobals", "bool"}},
+        {"--window-inject-client-library", {"/modes/window/injectClientLibrary", "bool"}},
+        {"--window-inject-script", {"/modes/window/injectScript", "string"}},
         // Chrome mode
         {"--chrome-width", {"/modes/chrome/width", "int"}},
         {"--chrome-height", {"/modes/chrome/height", "int"}},

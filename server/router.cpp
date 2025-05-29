@@ -3,6 +3,7 @@
 #include <fstream>
 #include <regex>
 #include <vector>
+#include <filesystem>
 
 #include <websocketpp/server.hpp>
 
@@ -10,6 +11,7 @@
 #include "auth/authbasic.h"
 #include "auth/permission.h"
 #include "server/router.h"
+#include "server/neuserver.h"
 #include "helpers.h"
 #include "errors.h"
 #include "settings.h"
@@ -25,6 +27,7 @@
 #include "api/extensions/extensions.h"
 #include "api/clipboard/clipboard.h"
 #include "api/res/res.h"
+#include "api/server/server.h"
 #include "api/custom/custom.h"
 
 #if defined(__APPLE__)
@@ -69,6 +72,8 @@ map<string, router::NativeMethod> methodMap = {
     {"window.getSize", window::controllers::getSize},
     {"window.getPosition", window::controllers::getPosition},
     {"window.setAlwaysOnTop", window::controllers::setAlwaysOnTop},
+    {"window.snapshot", window::controllers::snapshot},
+    {"window.setMainMenu", window::controllers::setMainMenu},
     // Neutralino.computer
     {"computer.getMemoryInfo", computer::controllers::getMemoryInfo},
     {"computer.getArch", computer::controllers::getArch},
@@ -101,6 +106,8 @@ map<string, router::NativeMethod> methodMap = {
     {"filesystem.getAbsolutePath", fs::controllers::getAbsolutePath},
     {"filesystem.getRelativePath", fs::controllers::getRelativePath},
     {"filesystem.getPathParts", fs::controllers::getPathParts},
+    {"filesystem.getPermissions", fs::controllers::getPermissions},
+    {"filesystem.setPermissions", fs::controllers::setPermissions},
     // Neutralino.os
     {"os.execCommand", os::controllers::execCommand},
     {"os.spawnProcess", os::controllers::spawnProcess},
@@ -131,13 +138,21 @@ map<string, router::NativeMethod> methodMap = {
     {"clipboard.readText", clipboard::controllers::readText},
     {"clipboard.readImage", clipboard::controllers::readImage},
     {"clipboard.writeText", clipboard::controllers::writeText},
+    {"clipboard.writeHTML", clipboard::controllers::writeHTML},
+    {"clipboard.readHTML", clipboard::controllers::readHTML},
     {"clipboard.writeImage", clipboard::controllers::writeImage},
     {"clipboard.clear", clipboard::controllers::clear},
     // Neutralino.resources
     {"resources.getFiles", res::controllers::getFiles},
+    {"resources.getStats", res::controllers::getStats},
     {"resources.extractFile", res::controllers::extractFile},
+    {"resources.extractDirectory", res::controllers::extractDirectory},
     {"resources.readFile", res::controllers::readFile},
     {"resources.readBinaryFile", res::controllers::readBinaryFile},
+    // Neutralino.server
+    {"server.mount", server::controllers::mount},
+    {"server.unmount", server::controllers::unmount},
+    {"server.getMounts", server::controllers::getMounts},
     // Neutralino.custom
     {"custom.getMethods", custom::controllers::getMethods},
     // {"custom.add", custom::controllers::add} // Sample custom method
@@ -208,6 +223,54 @@ router::NativeMessage executeNativeMethod(const router::NativeMessage &request) 
     }
 }
 
+map<string, string> mountedPaths = {};
+
+errors::StatusCode mountPath(string &path, string &target) {
+    path = helpers::normalizePath(path);
+    target = helpers::normalizePath(target);
+
+    if(path.empty()) {
+        path = "/";
+    }
+
+    const auto targetPath = filesystem::path(CONVSTR(target));
+    
+    if(!filesystem::exists(targetPath)) {
+        return errors::NE_FS_NOPATHE;
+    }
+    if(!filesystem::is_directory(targetPath)) {
+        return errors::NE_FS_NOTADIR;
+    }
+    if(router::isMounted(path)) {
+        return errors::NE_SR_MPINUSE;
+    }
+
+    mountedPaths[path] = target;
+    return errors::NE_ST_OK;
+}
+
+bool isMounted(const string &path) {
+    return mountedPaths.find(path) != mountedPaths.end();
+}
+
+bool unmountPath(string &path) {
+    path = helpers::normalizePath(path);
+    
+    if(path.empty()) {
+        path = "/";
+    }
+    if(!router::isMounted(path)) {
+        return false;
+    }
+    
+    mountedPaths.erase(path);
+    return true;
+}
+
+map<string, string> getMounts() {
+    return mountedPaths;
+}
+
 router::Response getAsset(string path, const string &prependData) {
     router::Response response;
     vector<string> split = helpers::split(path, '.');
@@ -272,7 +335,29 @@ router::Response getAsset(string path, const string &prependData) {
         {"wasm", "application/wasm"}
     };
 
-    fs::FileReaderResult fileReaderResult = resources::getFile(path);
+    fs::FileReaderResult fileReaderResult;
+    bool foundMountedPath = false;
+
+    if(mountedPaths.size() > 0) {
+        string pathname = path;
+        string documentRoot = neuserver::getDocumentRoot();
+        if(!documentRoot.empty()) {
+            pathname = path.substr(documentRoot.length());
+        }
+        for(const auto& [mountedPath, mountTarget] : mountedPaths) {
+            if(pathname.find(mountedPath) == 0) {
+                string adjustedPath = mountTarget + "/" + pathname.substr(mountedPath.length());
+                fileReaderResult = fs::readFile(adjustedPath);
+                foundMountedPath = true;
+                break;
+            }
+        }
+    }
+
+    if(!foundMountedPath) {
+        fileReaderResult = resources::getFile(path);
+    }
+    
     if(fileReaderResult.status != errors::NE_ST_OK) {
         json jSpaServing = settings::getOptionForCurrentMode("singlePageServe");
         if(!jSpaServing.is_null() && jSpaServing.get<bool>() && regex_match(path, regex(".*index.html$"))) {

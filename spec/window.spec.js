@@ -4,6 +4,28 @@ const runner = require('./runner');
 
 describe('window.spec: window namespace tests', () => {
 
+    describe('window.snapshot', () => {
+        it('captures the screen and saves to the specified file path', async () => {
+            runner.run(`
+                await Neutralino.window.snapshot('screenshot.png');
+                await Neutralino.filesystem.getStats('screenshot.png');
+                await __close('done');
+            `);
+            assert.equal(runner.getOutput(), 'done');
+        });
+
+        it('throws an error for missing file path parameter', async () => {
+            runner.run(`
+                try {
+                    await Neutralino.window.snapshot();
+                } catch (err) {
+                    await __close(err.code);
+                }
+            `);
+            assert.equal(runner.getOutput(), 'NE_RT_NATRTER');
+            });
+    }); 
+
     describe('window.setTitle', () => {
         it('works without parameters', async () => {
             runner.run(`
@@ -15,12 +37,13 @@ describe('window.spec: window namespace tests', () => {
     });
 
     describe('window.getTitle', () => {
-        it('returns a string value', async () => {
+        it('returns the existing title string', async () => {
             runner.run(`
+                await Neutralino.window.setTitle('NeutralinoJs');
                 let title = await Neutralino.window.getTitle();
-                await __close(JSON.stringify({out: title}));
+                await __close(title);
             `);
-            assert.ok(typeof JSON.parse(runner.getOutput()).out == 'string');
+            assert.ok(runner.getOutput() === 'NeutralinoJs');
         });
     });
 

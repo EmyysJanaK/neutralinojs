@@ -2,8 +2,10 @@
 #include <string>
 #include <algorithm>
 #include <sstream>
-#include <time.h>
+#include <chrono>
+#include <iomanip>
 #include <ctype.h>
+#include <random>
 
 #include "helpers.h"
 #include "lib/json/json.hpp"
@@ -36,23 +38,29 @@ vector<string> splitTwo(const string &s, char delim) {
 }
 
 string generateToken() {
-    srand(time(NULL));
-
-    string s = "";
-    static const char alphanum[] =
+    static const string characters =
         "-_"
         "0123456789"
         "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
         "abcdefghijklmnopqrstuvwxyz";
 
-    for (int i = 0; i < 96; ++i) {
-        s += alphanum[rand() % (sizeof(alphanum) - 1)];
-        if(i == 47) {
-            s += ".";
-        }
-    }
+    const int length = 96;
 
-    return s;
+    string token;
+    token.reserve(length);
+
+    random_device rd;
+    mt19937 generator(rd()); 
+    uniform_int_distribution<int> distribution(0, characters.size() - 1);
+
+    for (int i = 0; i < length; ++i) {
+        if (i == 47) {
+            token += ".";
+        }
+        token += characters[distribution(generator)];
+    }
+    
+    return token;
 }
 
 /*
@@ -130,6 +138,20 @@ string appModeToStr(settings::AppMode mode) {
     }
 }
 
+string getCurrentTimestamp() {
+    auto now = chrono::system_clock::now();
+    auto nowTimeT = chrono::system_clock::to_time_t(now);
+    auto nowMs = chrono::duration_cast<chrono::milliseconds>(
+                      now.time_since_epoch())
+                      .count() % 1000;
+
+    ostringstream oss;
+    oss << put_time(gmtime(&nowTimeT), "%Y-%m-%dT%H:%M:%S")
+        << "." << setfill('0') << setw(3) << nowMs << "Z";
+
+    return oss.str();
+}
+
 string normalizePath(string &path) {
     #if defined(_WIN32)
     replace(path.begin(), path.end(), '\\', '/');
@@ -145,6 +167,10 @@ string unNormalizePath(string &path) {
     replace(path.begin(), path.end(), '/', '\\');
     #endif
     return path;
+}
+
+string jsonToString(const json &obj) {
+    return obj.dump(-1, ' ', false, json::error_handler_t::replace);
 }
 
 #if defined(_WIN32)

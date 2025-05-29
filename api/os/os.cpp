@@ -12,6 +12,7 @@
 #include <cstring>
 #include <vector>
 #include <filesystem>
+#include <functional>
 #include <atomic>
 #include <climits>
 
@@ -87,45 +88,60 @@ void cleanupTray() {
 
 void open(const string &url) {
     #if defined(__linux__) || defined(__FreeBSD__)
-    os::execCommand("xdg-open \"" + url + "\"", "", true);
+    os::ChildProcessOptions processOptions;
+    processOptions.background = true;
+    os::execCommand("xdg-open \"" + url + "\"", processOptions);
     #elif defined(__APPLE__)
-    os::execCommand("open \"" + url + "\"", "", true);
+    os::ChildProcessOptions processOptions;
+    processOptions.background = true;
+    os::execCommand("open \"" + url + "\"", processOptions);
     #elif defined(_WIN32)
     ShellExecute(0, 0, helpers::str2wstr(url).c_str(), 0, 0, SW_SHOW );
     #endif
 }
 
-os::CommandResult execCommand(string command, const string &input, bool background, const string &cwd) {
+os::CommandResult execCommand(string command, const os::ChildProcessOptions &options) {
     #if defined(_WIN32)
     command = "cmd.exe /c \"" + command + "\"";
     #endif
 
     os::CommandResult commandResult;
     TinyProcessLib::Process *childProcess;
+    TinyProcessLib::Process::environment_type processEnv;
 
-    if(!background)
-        childProcess = new TinyProcessLib::Process(
-            CONVSTR(command), CONVSTR(cwd),
-            [&](const char *bytes, size_t n) {
-                commandResult.stdOut += string(bytes, n);
-            },
-            [&](const char *bytes, size_t n) {
-                commandResult.stdErr += string(bytes, n);
-            }, !input.empty()
-        );
-    else {
-        childProcess = new TinyProcessLib::Process(CONVSTR(command), CONVSTR(cwd),
-                                nullptr, nullptr, !input.empty());
+    for(const auto& [key, value]: options.envs) {
+        processEnv[CONVSTR(key)] = CONVSTR(value);
     }
 
+    auto stdOutHandler = [&](const char *bytes, size_t n) {
+        commandResult.stdOut += string(bytes, n);
+    };
+
+    auto stdErrHandler = [&](const char *bytes, size_t n) {
+        commandResult.stdErr += string(bytes, n);
+    };
+
+    if(!options.background && options.envs.empty()) { 
+        childProcess = new TinyProcessLib::Process(CONVSTR(command), CONVSTR(options.cwd), stdOutHandler, stdErrHandler, !options.stdIn.empty());
+    }
+    else if(options.background && options.envs.empty()) {
+        childProcess = new TinyProcessLib::Process(CONVSTR(command), CONVSTR(options.cwd), nullptr, nullptr, !options.stdIn.empty());
+    }
+    else if(!options.background && !options.envs.empty()) {
+        childProcess = new TinyProcessLib::Process(CONVSTR(command), CONVSTR(options.cwd), processEnv, stdOutHandler, stdErrHandler, !options.stdIn.empty());
+    }
+    else {
+        childProcess = new TinyProcessLib::Process(CONVSTR(command), CONVSTR(options.cwd), processEnv, nullptr, nullptr, !options.stdIn.empty());
+    }
+    
     commandResult.pid = childProcess->get_id();
 
-    if(!input.empty()) {
-        childProcess->write(input);
+    if(!options.stdIn.empty()) {
+        childProcess->write(options.stdIn);
         childProcess->close_stdin();
     }
 
-    if(!background) {
+    if(!options.background) {
         commandResult.exitCode = childProcess->get_exit_status(); // sync wait
     }
 
@@ -133,7 +149,7 @@ os::CommandResult execCommand(string command, const string &input, bool backgrou
     return commandResult;
 }
 
-pair<int, int> spawnProcess(string command, const string &cwd) {
+pair<int, int> spawnProcess(string command, const os::ChildProcessOptions &options) {
     #if defined(_WIN32)
     command = "cmd.exe /c \"" + command + "\"";
     #endif
@@ -142,25 +158,49 @@ pair<int, int> spawnProcess(string command, const string &cwd) {
     lock_guard<mutex> guard(spawnedProcessesLock);
 
     int virtualPid = nextVirtualPid++;
-    if (virtualPid == INT_MAX) {
+    if(virtualPid == INT_MAX) {
         nextVirtualPid = 0;
     }
 
-    childProcess = new TinyProcessLib::Process(
-        CONVSTR(command), CONVSTR(cwd),
-        [=](const char *bytes, size_t n) {
+
+    auto stdOutHandler = [=](const char *bytes, size_t n) {
+        if(options.events) {
             __dispatchSpawnedProcessEvt(virtualPid, "stdOut", string(bytes, n));
-        },
-        [=](const char *bytes, size_t n) {
+        }
+        if(options.stdOutHandler != nullptr) {
+            options.stdOutHandler(bytes, n);
+        }
+    };
+
+    auto stdErrHandler = [=](const char *bytes, size_t n) {
+        if(options.events) {
             __dispatchSpawnedProcessEvt(virtualPid, "stdErr", string(bytes, n));
-        }, true
-    );
+        }
+        if(options.stdErrHandler != nullptr) {
+            options.stdErrHandler(bytes, n);
+        }
+    };
+
+    if(options.envs.empty()) {
+        childProcess = new TinyProcessLib::Process(CONVSTR(command), CONVSTR(options.cwd), stdOutHandler, stdErrHandler, true);
+    }
+    else {
+        TinyProcessLib::Process::environment_type processEnv;
+        for(const auto& [key, value]: options.envs) {
+            processEnv[CONVSTR(key)] = CONVSTR(value);
+        }
+        childProcess = new TinyProcessLib::Process(CONVSTR(command), CONVSTR(options.cwd), processEnv, stdOutHandler, stdErrHandler, true);
+    }
 
     spawnedProcesses[virtualPid] = childProcess;
 
     thread processThread([=](){
         int exitCode = childProcess->get_exit_status(); // sync wait
-        __dispatchSpawnedProcessEvt(virtualPid, "exit", exitCode);
+        
+        if(options.events) {
+            __dispatchSpawnedProcessEvt(virtualPid, "exit", exitCode);
+        }
+        
         lock_guard<mutex> guard(spawnedProcessesLock);
         spawnedProcesses.erase(virtualPid);
         delete childProcess;
@@ -254,19 +294,25 @@ json execCommand(const json &input) {
         return output;
     }
     string command = input["command"].get<string>();
-    bool background = false;
-    string stdIn = "";
-    string cwd = "";
+    os::ChildProcessOptions processOptions;
+
     if(helpers::hasField(input, "stdIn")) {
-        stdIn = input["stdIn"].get<string>();
+        processOptions.stdIn = input["stdIn"].get<string>();
     }
     if(helpers::hasField(input, "background")) {
-        background = input["background"].get<bool>();
+        processOptions.background = input["background"].get<bool>();
     }
     if(helpers::hasField(input, "cwd")) {
-        cwd = input["cwd"].get<string>();
+        processOptions.cwd = input["cwd"].get<string>();
     }
-    os::CommandResult commandResult = os::execCommand(command, stdIn, background, cwd);
+
+    if(helpers::hasField(input, "envs")) {
+        for(auto &[key, value]: input["envs"].items()) {
+            processOptions.envs[key] = value.get<string>();
+        }
+    }
+
+    os::CommandResult commandResult = os::execCommand(command, processOptions);
 
     json retVal;
     retVal["pid"] = commandResult.pid;
@@ -286,13 +332,21 @@ json spawnProcess(const json &input) {
         output["error"] = errors::makeMissingArgErrorPayload();
         return output;
     }
+    
     string command = input["command"].get<string>();
-    string cwd = "";
+    os::ChildProcessOptions processOptions;
+    
     if(helpers::hasField(input, "cwd")) {
-        cwd = input["cwd"].get<string>();
+        processOptions.cwd = input["cwd"].get<string>();
     }
 
-    auto spawnedData = os::spawnProcess(command, cwd);
+    if(helpers::hasField(input, "envs")) {
+        for(auto &[key, value]: input["envs"].items()) {
+            processOptions.envs[key] = value.get<string>();
+        }
+    }
+
+    auto spawnedData = os::spawnProcess(command, processOptions);
 
     json process;
     process["id"] = spawnedData.first;
@@ -620,19 +674,18 @@ json setTray(const json &input) {
         #if defined(__linux__)
         string fullIconPath;
         if(resources::isDirMode()) {
-            fullIconPath = string(filesystem::absolute(settings::joinAppPath(""))) + iconPath;
+            fullIconPath = string(filesystem::absolute(settings::joinAppPath(iconPath)));
         }
         else {
             // Use alternating tempIconPath since tray_update()
             // doesn't update the icon if the path is the same as the previous one,
             // regardless whether the file contents changed or not.
             useOtherTempTrayIcon = !useOtherTempTrayIcon;
-            string tempIconPath = settings::joinAppPath(
+            string tempIconPath = settings::joinAppDataPath(
                     useOtherTempTrayIcon ?  "/.tmp/tray_icon_linux_01.png" : "/.tmp/tray_icon_linux_02.png"
             );
 
-            string tempDirPath = settings::joinAppPath("/.tmp");
-            filesystem::create_directories(tempDirPath);
+            string tempDirPath = settings::joinAppDataPath("/.tmp");;
             resources::extractFile(iconPath, tempIconPath);
             fullIconPath = filesystem::absolute(tempIconPath);
         }

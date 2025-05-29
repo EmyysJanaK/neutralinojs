@@ -48,7 +48,19 @@ void init() {
                                 : extension["command"].get<string>();
             command = regex_replace(command, regex("\\$\\{NL_PATH\\}"), settings::getAppPath());
 
-            os::execCommand(command, __buildExtensionProcessInput(extensionId).dump(), true); // async
+            os::ChildProcessOptions processOptions;
+            processOptions.events = false;
+            processOptions.stdOutHandler = [=](const char *bytes, size_t n){
+                cout << string(bytes, n) << flush;
+            };
+            processOptions.stdErrHandler = [=](const char *bytes, size_t n){
+                cerr << string(bytes, n) << flush;
+            };
+            
+            auto process = os::spawnProcess(command, processOptions);
+            os::updateSpawnedProcess({process.first, "stdIn", helpers::jsonToString(__buildExtensionProcessInput(extensionId))});
+            os::updateSpawnedProcess({process.first, "stdInEnd"});
+            
         }
 
         extensions::loadOne(extensionId);

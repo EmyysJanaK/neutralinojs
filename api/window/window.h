@@ -57,12 +57,26 @@ struct WindowOptions {
     bool transparent = false;
     bool exitProcessOnClose = true;
     bool useSavedState = true;
+    bool injectGlobals = false;
+    bool injectClientLibrary = false;
     string title = "Neutralinojs";
     string url = "https://neutralino.js.org";
     string icon = "";
     string extendUserAgentWith = "";
+    string injectScript = "";
     int x = 0;
     int y = 0;
+};
+
+struct WindowMenuItem {
+  string id;
+  string text;
+  bool disabled = false;
+  bool checked = false;
+  string action = "menuCallback:";
+  string shortcut;
+
+  void (*cb)(struct WindowMenuItem *);
 };
 
 namespace handlers {
@@ -91,6 +105,8 @@ pair<int, int> getPosition();
 void center(bool useConfigSizes);
 void setAlwaysOnTop(bool onTop);
 void setBorderless();
+bool snapshot(const string &filename);
+void setMainMenu(const json &menu);
 
 void _close(int exitCode);
 
@@ -119,6 +135,8 @@ json setSize(const json &input);
 json getSize(const json &input);
 json getPosition(const json &input);
 json setAlwaysOnTop(const json &input);
+json snapshot(const json &input);
+json setMainMenu(const json &input);
 
 } // namespace controllers
 

@@ -13,6 +13,7 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include <regex>
 
 #include <windows.h>
 
@@ -276,6 +277,58 @@ bool lock::impl::set_data(format f, const char* buf, size_t len) {
       }
     }
   }
+  else if (f == html_format()) {
+    UINT CF_HTML = html_format();
+
+    std::string headerTemplate = 
+      "Version:0.9\r\n"
+      "StartHTML:00000000\r\n"
+      "EndHTML:00000000\r\n"
+      "StartFragment:00000000\r\n"
+      "EndFragment:00000000\r\n"
+      "<html><body>\r\n";
+
+    std::string footerTemplate = 
+      "</body>\r\n"
+      "</html>";
+    std::string fragment = std::string(buf, len);
+    std::string fullHtmlContent = headerTemplate + 
+      fragment + 
+      footerTemplate;
+
+    size_t startHtmlOffset = headerTemplate.find("StartHTML:") + 10;
+    size_t endHtmlOffset = headerTemplate.find("EndHTML:") + 8;
+    size_t startFragOffset = headerTemplate.find("StartFragment:") + 14;
+    size_t endFragOffset = headerTemplate.find("EndFragment:") + 12;
+
+
+    char offsetBuffer[9];
+    sprintf(offsetBuffer, "%08zu", headerTemplate.find("<html>"));
+    fullHtmlContent.replace(startHtmlOffset, 8, offsetBuffer);
+
+    sprintf(offsetBuffer, "%08zu", fullHtmlContent.length());
+    fullHtmlContent.replace(endHtmlOffset, 8, offsetBuffer);
+
+    sprintf(offsetBuffer, "%08zu", headerTemplate.length());
+    fullHtmlContent.replace(startFragOffset, 8, offsetBuffer);
+
+    sprintf(offsetBuffer, "%08zu", headerTemplate.length() + fragment.length());
+    fullHtmlContent.replace(endFragOffset, 8, offsetBuffer);
+
+    Hglobal hglobal(fullHtmlContent.size() + 1);
+    if (hglobal) {
+      auto dst = static_cast<char*>(GlobalLock(hglobal));
+      if (dst) {
+        memcpy(dst, fullHtmlContent.c_str(), fullHtmlContent.size());
+        dst[fullHtmlContent.size()] = '\0';  // Null-terminate
+        GlobalUnlock(hglobal);
+        
+        result = (SetClipboardData(CF_HTML, hglobal) ? true : false);
+        if (result)
+          hglobal.release();
+      }
+    }
+  }
   else {
     Hglobal hglobal(len+sizeof(CustomSizeT));
     if (hglobal) {
@@ -335,6 +388,29 @@ bool lock::impl::get_data(format f, char* buf, size_t len) const {
       }
     }
   }
+  else if (f == html_format()) {
+    if (IsClipboardFormatAvailable(html_format())) {
+      HGLOBAL hglobal = GetClipboardData(html_format());
+      if (hglobal) {
+        LPSTR lpstr = (LPSTR)GlobalLock(hglobal);
+        if (lpstr) {
+          // TODO check length
+          std::string html = std::string(lpstr); 
+          std::smatch sMatches, eMatches;
+          regex_search(html, sMatches, std::regex("StartFragment:(\\d+)"));
+          regex_search(html, eMatches, std::regex("EndFragment:(\\d+)"));
+          if(sMatches.size() > 1 && eMatches.size() > 1) {
+            size_t fragmentStart = std::stoi(sMatches[1]);
+            size_t fragmentEnd = std::stoi(eMatches[1]);
+            std::string fragment = html.substr(fragmentStart, fragmentEnd - fragmentStart);
+            memcpy(buf, fragment.c_str(), len);
+            result = true;
+          }
+          GlobalUnlock(hglobal);
+        }
+      }
+    }
+  }
   else {
     if (IsClipboardFormatAvailable(f)) {
       HGLOBAL hglobal = GetClipboardData(f);
@@ -383,6 +459,18 @@ size_t lock::impl::get_data_length(format f) const {
     }
     else if (IsClipboardFormatAvailable(CF_TEXT)) {
       HGLOBAL hglobal = GetClipboardData(CF_TEXT);
+      if (hglobal) {
+        LPSTR lpstr = (LPSTR)GlobalLock(hglobal);
+        if (lpstr) {
+          len = strlen(lpstr) + 1;
+          GlobalUnlock(hglobal);
+        }
+      }
+    }
+  }
+  else if(f == html_format()) {
+    if (IsClipboardFormatAvailable(html_format())) {
+      HGLOBAL hglobal = GetClipboardData(html_format());
       if (hglobal) {
         LPSTR lpstr = (LPSTR)GlobalLock(hglobal);
         if (lpstr) {

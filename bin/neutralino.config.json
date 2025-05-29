@@ -9,6 +9,7 @@
     "enableServer": true,
     "tokenSecurity": "one-time",
     "storageLocation": "system",
+    "dataLocation": "app",
     "enableNativeAPI": true,
     "exportAuthInfo": false,
     "serverHeaders": {
@@ -50,7 +51,9 @@
             "exitProcessOnClose": false,
             "useSavedState": true,
             "port": 0,
-            "extendUserAgentWith": "NeutralinojsSampleApp"
+            "extendUserAgentWith": "NeutralinojsSampleApp",
+            "injectGlobals": false,
+            "injectClientLibrary": false
         },
         "browser": {
             "globalVariables": {

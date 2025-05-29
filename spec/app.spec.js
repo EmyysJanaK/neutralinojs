@@ -1,9 +1,10 @@
 const assert = require('assert');
+
 const runner = require('./runner');
 
 describe('app.spec: app namespace tests', () => {
     describe('app.exit', () => {
-            
+
         it('works without parameters', async () => {
             let exitCode = runner.run(`
                 setTimeout(() => {
@@ -21,7 +22,7 @@ describe('app.spec: app namespace tests', () => {
             `);
             assert.ok(typeof exitCode != undefined);
         });
-        
+
         it('throws an error for invalid exit codes', async () => {
             runner.run(`
                 try {

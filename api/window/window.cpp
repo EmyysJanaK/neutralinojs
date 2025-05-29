@@ -1,6 +1,7 @@
 #include <string>
 #include <iostream>
 #include <filesystem>
+#include <regex>
 
 #if defined(__linux__) || defined(__FreeBSD__)
 #include <gtk/gtk.h>
@@ -15,6 +16,10 @@
 #define NSBaseWindowLevel 0
 #define NSFloatingWindowLevel 5
 #define NSWindowStyleMaskFullScreen 16384
+#define NSPNGFileType 4
+
+#define kCGWindowListOptionIncludingWindow 8
+#define kCGWindowImageBoundsIgnoreFraming 1
 
 #elif defined(_WIN32)
 #define _WINSOCKAPI_
@@ -51,12 +56,16 @@ webview::webview *nativeWindow;
 #if defined(__linux__) || defined(__FreeBSD__)
 bool isGtkWindowFullScreen = false;
 bool isGtkWindowMinimized = false;
+GtkWidget *menuContainer;
 
 #elif defined(_WIN32)
+#define ID_MENU_FIRST 20000;
 bool isWinWindowFullScreen = false;
 DWORD savedStyle;
 DWORD savedStyleX;
 RECT savedRect;
+HMENU windowMenu;
+int windowMenuItemId = ID_MENU_FIRST;
 #endif
 
 window::WindowOptions windowProps;
@@ -178,6 +187,28 @@ void __undoFakeHidden() {
         x, y, 0, 0, SWP_NOZORDER | SWP_NOSIZE);
 	ShowWindow(windowHandle, SW_SHOW);
 }
+
+bool __getEncoderClsid(const WCHAR *format, CLSID *pClsid) {
+    UINT num = 0;
+    UINT size = 0;
+
+    GetImageEncodersSize(&num, &size);
+    if(size == 0) return false; // Failure
+
+    ImageCodecInfo *pImageCodecInfo = (ImageCodecInfo *)(malloc(size));
+    if(pImageCodecInfo == NULL) return false;
+
+    GetImageEncoders(num, size, pImageCodecInfo);
+    for(UINT i = 0; i < num; ++i) {
+        if(wcscmp(pImageCodecInfo[i].MimeType, format) == 0) {
+            *pClsid = pImageCodecInfo[i].Clsid;
+            free(pImageCodecInfo);
+            return true;
+        }
+    }
+    free(pImageCodecInfo);
+    return false;
+}
 #endif
 
 json __sizeOptionsToJson(const window::SizeOptions &opt) {
@@ -201,13 +232,13 @@ void __saveWindowProps() {
     options["y"] = pos.second;
     options["maximize"] = window::isMaximized();
 
-    filesystem::create_directories(CONVSTR(settings::joinAppPath("/.tmp")));
-    fs::FileWriterOptions writerOptions = { settings::joinAppPath(NEU_WIN_CONFIG_FILE), options.dump() };
+    filesystem::create_directories(CONVSTR(settings::joinAppDataPath("/.tmp")));
+    fs::FileWriterOptions writerOptions = { settings::joinAppDataPath(NEU_WIN_CONFIG_FILE), helpers::jsonToString(options) };
     fs::writeFile(writerOptions);
 }
 
 bool __loadSavedWindowProps() {
-    fs::FileReaderResult readerResult = fs::readFile(settings::joinAppPath(NEU_WIN_CONFIG_FILE));
+    fs::FileReaderResult readerResult = fs::readFile(settings::joinAppDataPath(NEU_WIN_CONFIG_FILE));
     if(readerResult.status != errors::NE_ST_OK) {
         return false;
     }
@@ -225,6 +256,244 @@ bool __loadSavedWindowProps() {
         return false;
     }
     return true;
+}
+
+void __handleMainMenuItem(window::WindowMenuItem *item) {
+    (void)item;
+    json eventData;
+    eventData["id"] = item->id;
+    eventData["text"] = item->text;
+    eventData["isChecked"] = item->checked;
+    eventData["isDisabled"] = item->disabled;
+    events::dispatch("mainMenuItemClicked", eventData);
+}
+
+#if defined(_WIN32)
+HMENU __createMenu(const json &menu, bool root) {
+    HMENU hMenu = root ? CreateMenu() : CreatePopupMenu();
+    for(const auto &jMenuItem : menu) {
+        window::WindowMenuItem *menuItem = new window::WindowMenuItem;
+
+        if(helpers::hasField(jMenuItem, "id")) {
+            menuItem->id = jMenuItem["id"].get<string>();
+        }
+
+        if(helpers::hasField(jMenuItem, "text")) {
+            menuItem->text = jMenuItem["text"].get<string>();
+        } 
+
+        if(helpers::hasField(jMenuItem, "isDisabled")) {
+            menuItem->disabled = jMenuItem["isDisabled"].get<bool>();
+        }
+
+        if(helpers::hasField(jMenuItem, "isChecked")) {
+            menuItem->checked = jMenuItem["isChecked"].get<bool>();
+        }  
+
+        if(helpers::hasField(jMenuItem, "shortcut")) {
+            menuItem->shortcut = jMenuItem["shortcut"].get<string>();
+            menuItem->text += "\t\t" + menuItem->shortcut;
+        }
+
+        menuItem->cb = __handleMainMenuItem;
+
+        if(menuItem->text == "-") {
+            InsertMenu(hMenu, windowMenuItemId, MF_SEPARATOR, 1, L"");
+        } 
+        else {
+            MENUITEMINFO item;
+            memset(&item, 0, sizeof(item));
+            item.cbSize = sizeof(MENUITEMINFO);
+            item.fMask = MIIM_ID | MIIM_TYPE | MIIM_STATE | MIIM_DATA;
+            item.fType = 0;
+            item.fState = 0;
+            if (helpers::hasField(jMenuItem, "menuItems")) {
+                item.fMask = item.fMask | MIIM_SUBMENU;
+                item.hSubMenu = __createMenu(jMenuItem["menuItems"], false);
+                SendMessage(windowHandle, WM_WINDOW_PASS_MENU_REFS, (WPARAM)item.hSubMenu, 0);
+            }
+            if(menuItem->disabled) {
+                item.fState |= MFS_DISABLED;
+            }
+            if (menuItem->checked) {
+                item.fState |= MFS_CHECKED;
+            }
+            item.wID = windowMenuItemId;
+            wstring wtext = helpers::str2wstr(menuItem->text);
+            item.dwTypeData = (LPWSTR)wtext.data();
+            item.dwItemData = (ULONG_PTR)menuItem;
+
+            InsertMenuItem(hMenu, windowMenuItemId, 1, &item);
+
+            windowMenuItemId++;
+        }   
+    }
+
+    return hMenu;
+}
+#elif defined(__APPLE__)
+id __createMenu(const json &menu) {
+    id nsMenu = ((id (*)(id, SEL))objc_msgSend)("NSMenu"_cls, "new"_sel);
+                ((id (*)(id, SEL, id))objc_msgSend)(
+                    nsMenu,
+                    "initWithTitle:"_sel,
+                    ((id (*)(id, SEL, const char *))objc_msgSend)("NSString"_cls, "stringWithUTF8String:"_sel, "")
+                );
+
+    ((id (*)(id, SEL))objc_msgSend)(nsMenu, "autorelease"_sel);
+    ((id (*)(id, SEL, bool))objc_msgSend)(nsMenu, "setAutoenablesItems:"_sel, false);
+    for(const auto &jMenuItem : menu) {
+        window::WindowMenuItem *menuItem = new window::WindowMenuItem;
+
+        if(helpers::hasField(jMenuItem, "id")) {
+            menuItem->id = jMenuItem["id"].get<string>();
+        }
+
+        if(helpers::hasField(jMenuItem, "text")) {
+            menuItem->text = jMenuItem["text"].get<string>();
+        } 
+
+        if(helpers::hasField(jMenuItem, "isDisabled")) {
+            menuItem->disabled = jMenuItem["isDisabled"].get<bool>();
+        }
+
+        if(helpers::hasField(jMenuItem, "isChecked")) {
+            menuItem->checked = jMenuItem["isChecked"].get<bool>();
+        }  
+
+        if(helpers::hasField(jMenuItem, "action")) {
+            menuItem->action = jMenuItem["action"].get<string>();
+        }
+
+        if(helpers::hasField(jMenuItem, "shortcut")) {
+            menuItem->shortcut = jMenuItem["shortcut"].get<string>();
+        } 
+
+        menuItem->cb = __handleMainMenuItem;
+
+        if(menuItem->text == "-") {
+            id separatorItem = ((id (*)(id, SEL))objc_msgSend)(
+                    "NSMenuItem"_cls,
+                    "separatorItem"_sel);
+
+            ((id (*)(id, SEL, id))objc_msgSend)(nsMenu, "addItem:"_sel, separatorItem);
+        } 
+        else {
+            id nsMenuItem = ((id (*)(id, SEL))objc_msgSend)("NSMenuItem"_cls, "alloc"_sel);
+
+            ((id (*)(id, SEL))objc_msgSend)(nsMenuItem, "autorelease"_sel);
+
+            ((id (*)(id, SEL, id, SEL, id))objc_msgSend)(
+                nsMenuItem,
+                "initWithTitle:action:keyEquivalent:"_sel,
+                ((id (*)(id, SEL, const char *))objc_msgSend)("NSString"_cls, "stringWithUTF8String:"_sel, menuItem->text.c_str()),
+                sel_registerName(menuItem->action.c_str()),
+                ((id (*)(id, SEL, const char *))objc_msgSend)("NSString"_cls, "stringWithUTF8String:"_sel, menuItem->shortcut.c_str()));
+
+            ((id (*)(id, SEL, bool))objc_msgSend)(nsMenuItem, "setEnabled:"_sel, !menuItem->disabled);
+            ((id (*)(id, SEL, bool))objc_msgSend)(nsMenuItem, "setState:"_sel, menuItem->checked);
+
+            ((id (*)(id, SEL, id))objc_msgSend)(
+                nsMenuItem,
+                "setRepresentedObject:"_sel,
+                ((id (*)(id, SEL, void*))objc_msgSend)("NSValue"_cls, "valueWithPointer:"_sel, menuItem));
+
+            ((id (*)(id, SEL, id))objc_msgSend)(nsMenu, "addItem:"_sel, nsMenuItem);
+
+            if (helpers::hasField(jMenuItem, "menuItems")) {
+                id nsSubmenu = __createMenu(jMenuItem["menuItems"]);
+                ((id (*)(id, SEL, id, id))objc_msgSend)(
+                    nsMenu,
+                    "setSubmenu:forItem:"_sel,
+                    nsSubmenu,
+                    nsMenuItem);
+                ((id (*)(id, SEL, id))objc_msgSend)(
+                    nsSubmenu,
+                    "setTitle:"_sel,
+                    ((id (*)(id, SEL, const char *))objc_msgSend)("NSString"_cls, "stringWithUTF8String:"_sel, menuItem->text.c_str())
+                );
+            }
+        }   
+    }
+
+    return nsMenu;
+}
+#elif defined(__linux__) || defined(__FreeBSD__)
+static void __menuCallback(GtkMenuItem *item, gpointer data) {
+  (void)item;
+  window::WindowMenuItem *menuItem = (window::WindowMenuItem *)data;
+  menuItem->cb(menuItem);
+}
+
+GtkMenuShell* __createMenu(const json &menu, bool root) {
+    GtkMenuShell *gMenu = root ? (GtkMenuShell *)gtk_menu_bar_new() : (GtkMenuShell *)gtk_menu_new() ;
+    for(const auto &jMenuItem : menu) {
+        window::WindowMenuItem *menuItem = new window::WindowMenuItem;
+
+        if(helpers::hasField(jMenuItem, "id")) {
+            menuItem->id = jMenuItem["id"].get<string>();
+        }
+
+        if(helpers::hasField(jMenuItem, "text")) {
+            menuItem->text = jMenuItem["text"].get<string>();
+        } 
+
+        if(helpers::hasField(jMenuItem, "isDisabled")) {
+            menuItem->disabled = jMenuItem["isDisabled"].get<bool>();
+        }
+
+        if(helpers::hasField(jMenuItem, "isChecked")) {
+            menuItem->checked = jMenuItem["isChecked"].get<bool>();
+        }  
+
+        if(helpers::hasField(jMenuItem, "shortcut")) {
+            menuItem->shortcut = jMenuItem["shortcut"].get<string>();
+            menuItem->text += "\t\t" + menuItem->shortcut;
+        }
+
+        menuItem->cb = __handleMainMenuItem;
+
+        GtkWidget *item;
+        if(menuItem->text == "-") {
+            item = gtk_separator_menu_item_new();
+        } 
+        else {
+            if (helpers::hasField(jMenuItem, "menuItems")) {
+                item = gtk_menu_item_new_with_label(menuItem->text.c_str());
+                gtk_menu_item_set_submenu(GTK_MENU_ITEM(item),
+                                        GTK_WIDGET(__createMenu(jMenuItem["menuItems"], false)));
+            } 
+            else if(menuItem->checked) {
+                item = gtk_check_menu_item_new_with_label(menuItem->text.c_str());
+                gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(item), menuItem->checked);
+            } 
+            else {
+                item = gtk_menu_item_new_with_label(menuItem->text.c_str());
+            }
+            gtk_widget_set_sensitive(item, !menuItem->disabled);
+            if (menuItem->cb) {
+                g_signal_connect(item, "activate", G_CALLBACK(__menuCallback), menuItem);
+            }
+        }
+        gtk_widget_show(item);
+        gtk_menu_shell_append(gMenu, item);   
+    }
+
+    return gMenu;
+}
+#endif
+
+void _close(int exitCode) {
+    if(nativeWindow) {
+        if(windowProps.useSavedState) {
+            __saveWindowProps();
+        }
+        nativeWindow->terminate(exitCode);
+        #if defined(_WIN32)
+        FreeConsole();
+        #endif
+        delete nativeWindow;
+    }
 }
 
 NEU_W_HANDLE getWindowHandle() {
@@ -536,20 +805,128 @@ void setBorderless() {
     #endif
 }
 
-void _close(int exitCode) {
-    if(nativeWindow) {
-        if(windowProps.useSavedState) {
-            __saveWindowProps();
-        }
-        nativeWindow->terminate(exitCode);
-        #if defined(_WIN32)
-        FreeConsole();
-        #endif
-        delete nativeWindow;
+bool snapshot(const string &filename) {
+    #if defined(__linux__) || defined(__FreeBSD__)
+    int width, height, x, y;
+    GdkWindow *window = gtk_widget_get_window(windowHandle);
+    gdk_window_get_geometry(window, &x, &y, &width, &height);
+    GdkPixbuf *screenshot = gdk_pixbuf_get_from_window(window, x, y, width, height);
+    return gdk_pixbuf_save(screenshot, filename.c_str(), "png", nullptr, nullptr);
+
+    #elif defined(__APPLE__)
+    CGRect frameRect = __getWindowRect();
+    CGRect clientRect =
+            ((CGRect (*)(id, SEL, CGRect))objc_msgSend)(windowHandle, "contentRectForFrameRect:"_sel, frameRect);
+    clientRect.origin.y +=  frameRect.size.height - clientRect.size.height;
+
+    long winId = ((long(*)(id, SEL))objc_msgSend)(windowHandle, "windowNumber"_sel);
+    CGImageRef imgRef = CGWindowListCreateImage(clientRect, kCGWindowListOptionIncludingWindow, winId, kCGWindowImageBoundsIgnoreFraming); 
+      
+    id screenshot =
+        ((id (*)(id, SEL))objc_msgSend)("NSBitmapImageRep"_cls, "alloc"_sel);
+    ((void (*)(id, SEL, CGImageRef))objc_msgSend)(screenshot, "initWithCGImage:"_sel, imgRef);
+    id screenshotData =
+        ((id (*)(id, SEL, int, id))objc_msgSend)(screenshot, "representationUsingType:properties:"_sel, NSPNGFileType, nullptr);
+    bool status = ((bool (*)(id, SEL, id, bool))objc_msgSend)(screenshotData, "writeToFile:atomically:"_sel, 
+            ((id(*)(id, SEL, const char *))objc_msgSend)("NSString"_cls, "stringWithUTF8String:"_sel, filename.c_str())
+    , true);
+    
+    return status;
+   
+
+    #elif defined(_WIN32)
+    GdiplusStartupInput gdiplusStartupInput;
+    ULONG_PTR gdiplusToken;
+    GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, nullptr);
+
+    RECT rect;
+    GetClientRect(windowHandle, &rect);
+    int width = rect.right - rect.left;
+    int height = rect.bottom - rect.top;
+
+    HDC hdcWindow = GetDC(windowHandle);
+    HDC hdcMem = CreateCompatibleDC(hdcWindow);
+    HBITMAP hBitmap = CreateCompatibleBitmap(hdcWindow, width, height);
+
+    SelectObject(hdcMem, hBitmap);
+
+    if(!PrintWindow(windowHandle, hdcMem, PW_CLIENTONLY | PW_RENDERFULLCONTENT)) return false;
+
+    Bitmap *bitmap = Bitmap::FromHBITMAP(hBitmap, nullptr);
+    CLSID clsid;
+    if(!__getEncoderClsid(L"image/png", &clsid)) return false;
+
+    bool status = bitmap->Save(CONVSTR(filename).c_str(), &clsid, nullptr) == Gdiplus::Ok;
+
+    DeleteDC(hdcMem);
+    ReleaseDC(windowHandle, hdcWindow);
+    DeleteObject(hBitmap);
+    GdiplusShutdown(gdiplusToken);
+
+    return status;
+    #endif
+}
+
+void setMainMenu(const json &menu) {
+    #if defined(_WIN32)
+    SendMessage(windowHandle, WM_WINDOW_DELETE_MENU_REFS, 0, 0);
+    HMENU prevMenu = windowMenu;
+    windowMenuItemId = ID_MENU_FIRST;
+    windowMenu = __createMenu(menu, true);
+    SetMenu(windowHandle, windowMenu);
+
+    if(prevMenu) {
+        DestroyMenu(prevMenu);
     }
+
+    #elif defined(__APPLE__)
+    id app = ((id(*)(id, SEL))objc_msgSend)("NSApplication"_cls,
+                                            "sharedApplication"_sel);
+    ((void (*)(id, SEL, id))objc_msgSend)(app, "mainMenu"_sel, nullptr);
+    ((void (*)(id, SEL, id))objc_msgSend)(app, "setMainMenu:"_sel, __createMenu(menu));
+
+    #elif defined(__linux__) || defined(__FreeBSD__)
+    if(menuContainer) {
+        gtk_widget_destroy(menuContainer);
+    }
+
+    menuContainer = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    GtkMenuShell *windowMenu = __createMenu(menu, true);
+    GtkWidget *parentContainer = gtk_bin_get_child(GTK_BIN(windowHandle));
+
+    gtk_box_pack_start(GTK_BOX(parentContainer), menuContainer, false, false, 0);
+    gtk_box_reorder_child(GTK_BOX(parentContainer), menuContainer, 0);
+    gtk_box_pack_start(GTK_BOX(menuContainer), GTK_WIDGET(windowMenu), false, false, 0);
+    gtk_widget_show_all(menuContainer);
+
+    #endif
 }
 
 namespace controllers {
+
+void __injectClientLibrary() {
+    json options = settings::getConfig();
+    json jClientLibrary = options["cli"]["clientLibrary"];
+    if(!jClientLibrary.is_null()) {
+        string clientLibPath = jClientLibrary.get<string>();
+        fs::FileReaderResult fileReaderResult = resources::getFile(clientLibPath);
+        if(fileReaderResult.status == errors::NE_ST_OK) {
+            nativeWindow->init(settings::getGlobalVars() + "var NL_CINJECTED = true;" + 
+                fileReaderResult.data);
+        }
+    }
+}
+
+void __injectScript() {
+    json jInjectScript = settings::getOptionForCurrentMode("injectScript");
+    if(!jInjectScript.is_null()) {
+        string injectScript = jInjectScript.get<string>();
+        fs::FileReaderResult fileReaderResult = resources::getFile(injectScript);
+        if(fileReaderResult.status == errors::NE_ST_OK) {
+            nativeWindow->init("var NL_SINJECTED = true;" + fileReaderResult.data);
+        }
+    }
+}
 
 void __createWindow() {
     savedState = windowProps.useSavedState && __loadSavedWindowProps();
@@ -565,6 +942,15 @@ void __createWindow() {
                     windowProps.sizeOptions.maxWidth, windowProps.sizeOptions.maxHeight,
                     windowProps.sizeOptions.resizable);
     nativeWindow->setEventHandler(&window::handlers::windowStateChange);
+
+    if(windowProps.injectGlobals) 
+        nativeWindow->init(settings::getGlobalVars() + "var NL_GINJECTED = true;");
+
+    if(windowProps.injectClientLibrary)
+        __injectClientLibrary();
+
+    if(windowProps.injectScript != "")
+        __injectScript();
 
     #if defined(__linux__) || defined(__FreeBSD__)
     windowHandle = (GtkWidget*) nativeWindow->window();
@@ -891,6 +1277,9 @@ json init(const json &input) {
     if(helpers::hasField(input, "extendUserAgentWith"))
         windowProps.extendUserAgentWith = input["extendUserAgentWith"].get<string>();
 
+    if(helpers::hasField(input, "injectScript"))
+        windowProps.injectScript = input["injectScript"].get<string>();
+
     if(helpers::hasField(input, "enableInspector"))
         windowProps.enableInspector = input["enableInspector"].get<bool>();
 
@@ -915,7 +1304,39 @@ json init(const json &input) {
     if(helpers::hasField(input, "useSavedState"))
         windowProps.useSavedState = input["useSavedState"].get<bool>();
 
+    if(helpers::hasField(input, "injectGlobals"))
+        windowProps.injectGlobals = input["injectGlobals"].get<bool>();
+
+    if(helpers::hasField(input, "injectClientLibrary"))
+        windowProps.injectClientLibrary = input["injectClientLibrary"].get<bool>();
+
     __createWindow();
+    output["success"] = true;
+    return output;
+}
+
+json snapshot(const json &input) {
+    json output;
+    if (!helpers::hasRequiredFields(input, {"path"})) {
+        output["error"] = errors::makeMissingArgErrorPayload();
+        return output;
+    }
+
+    string imageFile = input["path"].get<string>();
+    if(window::snapshot(imageFile)) {
+        output["success"] = true;
+    }
+    else {
+        output["error"] = errors::makeErrorPayload(errors::NE_WI_UNBSWSR, imageFile);
+    }
+    return output;
+}
+
+json setMainMenu(const json &input) {
+    json output;
+
+    window::setMainMenu(input);
+
     output["success"] = true;
     return output;
 }

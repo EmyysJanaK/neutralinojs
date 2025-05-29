@@ -6,8 +6,171 @@ rename `Unreleased` topic with the new version tag. Finally, create a new `Unrel
 
 ## Unreleased
 
+## v6.1.0
+
+### API: Native window main menu
+The new `window.setMainMenu(menu)` function lets developers create a native window menu on GNU/Linux and Windows and an application menu on macOS. This function can be called multiple times with different menu objects to update menu items dynamically:
+
+```js
+const menu = [
+  {id: 'file', text: 'File',
+    menuItems: [
+    {id: 'open', text: 'Open'},
+    {text: '-'},
+    {id: 'quit', text: 'Quit'},
+  ]},
+  {id: 'edit', text: 'Edit',
+    menuItems: [
+    {id: 'cut', text: 'Cut'},
+    {id: 'copy', text: 'Copy'},
+    {id: 'paste', text: 'Paste'},
+  ]}
+];
+
+await Neutralino.window.setMainMenu(menu);
+```
+The framework will trigger the `mainMenuItemClicked` event with menu item data when the user clicks on a specific menu item.
+
+On macOS, app developers can register key accelerators and pre-defined actions as follows:
+
+```js
+{id: 'edit', text: 'Edit',
+  menuItems: [
+  {id: 'cut', text: 'Cut', action: 'cut:', shortcut: 'x'},
+  {id: 'copy', text: 'Copy', action: 'copy:', shortcut: 'c'},
+  {id: 'paste', text: 'Paste', action: 'paste:', shortcut: 'v'},
+]}
+```
+
+On GNU/Linux and Windows, the framework only displays the keyboard shortcut within the particular menu item and doesn't register a key accelerator yet:
+
+```js
+{id: 'copy', text: 'Copy', shortcut: 'Ctrl + C'}
+```
+
+*Note: We are planning to add key accelerator support for GNU/Linux and Windows native window menus with a global key accelerator feature in an upcoming framework version.* 
+
+### Core: global variables
+- Add `NL_LOCALE` to get the user locale name, e.g., `en_US.UTF-8`
+- Add `NL_COMPDATA` to display custom data strings embedded in the binary via the BuildZri configuration. Developers can use this global variable to set the build number or other static data when they compile their own framework binary with the BuildZri script:
+
+```json
+"definitions": {
+    "*": [
+        "NEU_COMPILATION_DATA=\\\"build_number=${BZ_BUILDNUMBER};compiler_name=${BZ_CONPILERNAME}\\\"",
+```
+
+## v6.0.0
+
+### API: clipboard
+- Implement `clipboard.writeHTML(html)` and `clipboard.readHTML()` functions to write/read HTML strings
+
+### API: os
+- Adding `envs` key-value pair parameter to the `options` of the `os.execCommand(command, options)` function to set specific environment variables for the child process.
+- Change the `os.spawnProcess(command, cwd)` to `os.spawnProcess(command, options)` to set environment variables and the current working directory via the `options` object for the spawned child process:
+```js
+// e.g.:
+await Neutralino.os.spawnCommand('env', {
+  cwd: NL_PATH,
+  envs: {
+    VAR1: 'var1',
+    VAR2: 'var2'
+  }
+});
+```
+
+### API: filesystem
+- Add the `timestamp` (ISO 8601) property to the `watchFile` event's data payload to identify when a specific file watcher event occurred.
+- Implement `filesystem.setPermissions(path, permissions, mode)` and `filesystem.getPermissions(path)` functions to set/get file permissions in a cross-platform way:
+```js
+// e.g.:
+await Neutralino.filesystem.setPermissions(NL_PATH + '/my-directory-1', {ownerRead: true, groupRead: true});
+await Neutralino.filesystem.setPermissions(NL_PATH + '/my-directory-2', {all: true});
+await Neutralino.filesystem.setPermissions(NL_PATH + '/my-directory-3', {otherAll: true}, 'REMOVE');
+
+const permissions = await Neutralino.filesystem.getPermissions(NL_PATH);
+// permissions -> {all:.., ownerRead, ownerWrite...}
+```
+### Core: extensions
+- Extensions are now loaded internally using the `os.spawnProcess()` function without triggering process events. This modification displays extension logs within the Windows terminal and lets app developers control extensions using the existing spawn process API.
+
+### Security
+- Improve the `NL_TOKEN` generation algorithm to strengthen security using the C++ `std::mt19937` random number generator.
+
+### Improvements/bugfixes
+- Fix framework crashing when creating the `.tmp` directory under restricted file manipulation permissions.
+- Fix several issues in the Windows-specific GUI notification implementation of the `os.showNotification()` function.
+- Fix invalid utf8 character handling issues in several native APIs (i.e., `os.spawnProcess('./bin')` crashed if `bin` output `"ä\xA9ü"`)
+
+## v5.6.0
+
+### API: server
+Neutralinojs doesn't support the `file://` protocol to load local resource files due to application security concerns. Because of this limitation, app developers had to read files using filesystem APIs. The new `server` namespace implements `server.mount(path, target)`, `server.unmount(path)`, and `server.getMounts()` functions to let developers load local files from the Neutralinojs static server by creating directory mappings as an alternative for the `file://` protocol.
+
+For example, the following function call configures the Neutralinojs static server to serve resources on the `${NL_PATH}/app-res` directory:
+
+```js
+await Neutralino.server.mount('/app-res', NL_PATH + '/app-res');
+```
+
+With the above server configuration, `NL_PATH + '/app-res/stat.txt'` can be loaded to the webview via the following URL:
+
+```
+http://127.0.0.1/app-res/stat.txt
+```
+
+This local directory mounting configuration can be deactivated as follows:
+
+```js
+await Neutralino.server.unmount('/app-res');
+```
+
+### API: resources
+- Fallback to native filesystem APIs when `NL_RESMODE` is `directory`.
+- Implement `resources.getStats(path)` and `resources.extractDirectory(path, destination)` functions.
+
+
+### API: window
+- Implement the `window.snapshot(path)` function to capture the window and save it as a PNG image file.
+
+### Improvements/bugfixes
+- Fix the empty string returning issue with the `window.getTitle()` function on Windows.
+- Create non-existent directories while extracting resource files using the `resources.extractFile()` function.
+- Supports using large `resources.neu` files.
+
+### DevOps
+- Fix minor string formatting issues in the BuildZri automation script.
+- Fix various test suite failure scenarios.
+
+## v5.5.0
+
+### Client library and globals injection
+Neutralinojs apps usually load globals and the client library using HTTP requests via the static server. This mechanism implements a generic way to enable the native API on all supported Neutralinojs app modes. However, this strategy prevents
+enabling the Neutralinojs native API if the primary web app is loaded through another server (local or remote). Now, app developers can inject globals and
+the client library script into external web services using `window.injectGlobals` and `window.injectClientLibrary` configuration options on the window mode.
+
+These options are available as CLI options as well (`--window-inject-globals` and `--window-inject-client-library`), so developers can use these options via the `window.create(url, options)` function. This code injection feature currently works with HTTP URLs only (can be used with local and remote HTTP web servers).
+
+### Preload script support
+The framework already lets developers set pre-defined global variables for each web page by using custom globals from the app configuration and activating the `window.injectGlobals` option. However, custom globals are static values, so app developers can't define dynamic values or run a custom JavaScript source using globals and `window.injectGlobals` features. This framework version implements the `window.injectScript` configuration option to inject and run custom JavaScript source file before running the primary webapp's JavaScript sources.
+
+For example, the following setup loads an initialization script from the `preload.js` file:
+
+```json
+"window": {
+  "injectScript": "/resources/js/preload.js"
+}
+```
+
+Developers can use native API calls within initialization scripts if `window.injectClientLibrary` is set to `true`. This option also can be set via `--window-inject-script` and `window.create(url, options)`.
+
 ### Configuration
-- Implement the `storageLocation` config option to let developers use system data directory for the Neutralinojs storage. If this option is 'app' (default), the framework store storage files within the app directory. If `system` is used, the framework will use the platform specific standard data directory. In both `app` and `system` modes, the framework will use the `.storage` sub-directory for storage files.
+- Implement the `dataLocation` config option to let users set data directory for framework data storage purposes, such as saving window state, storing extracted resources, etc. If `app` (default) is used, the framework will store app data within the app directory and if `system` is used, the framework will use a platform-specific data directory path (i.e., `/home/username/.local/share/<appId>` on GNU/Linux systems) to store app data. App developers can obtain the current data directory string from the `NL_DATAPATH` global variable.
+- Implement the `storageLocation` config option to let developers use system data directory for the Neutralinojs storage. If this option is 'app' (default), the framework store storage files within the app directory. If `system` is used, the framework will use the platform-specific standard data directory. In both `app` and `system` modes, the framework will use the `.storage` sub-directory for storage files.
+
+### Improvements/bugfixes
+- Search and load WebKitGtk functions dynamically from the available webkit2gtk library: `libwebkit2gtk-4.0-37` or `libwebkit2gtk-4.1-0`.
+- Fix the auto-reload issue during app development.
 
 ## v5.4.0
 

@@ -20,6 +20,10 @@
 
 #define NEU_APP_CONFIG_FILE "/neutralino.config.json"
 
+#if !defined(NEU_COMPILATION_DATA)
+#define NEU_COMPILATION_DATA ""
+#endif
+
 #include <string>
 
 #include "lib/json/json.hpp"
@@ -49,6 +53,8 @@ string getNavigationUrl();
 string getGlobalVars();
 void setGlobalArgs(const json &args);
 string joinAppPath(const string &filename);
+string joinSystemDataPath(const string &filename);
+string joinAppDataPath(const string &filename);
 string getAppPath();
 string getConfigFile();
 settings::AppMode getMode();

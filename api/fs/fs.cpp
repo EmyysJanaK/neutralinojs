@@ -62,6 +62,7 @@ void __dispatchWatcherEvt(efsw::WatchID watcherId, const std::string& dir,
     evt["id"] = watcherId;
     evt["dir"] = helpers::normalizePath(dirC);
     evt["filename"] = filename;
+    evt["timestamp"] = helpers::getCurrentTimestamp();
     switch (action) {
         case efsw::Actions::Add:
             evt["action"] = "add";
@@ -778,19 +779,115 @@ json getPathParts(const json &input) {
         output["error"] = errors::makeMissingArgErrorPayload();
         return output;
     }
-    auto path = filesystem::path(input["path"].get<string>());
+    string path = input["path"].get<string>();
+    auto pathObj = filesystem::path(CONVSTR(path));
+    
     json pathParts = {
-        {"rootName", FS_CONVWSTRN(path.root_name())},
-        {"rootDirectory", FS_CONVWSTRN(path.root_directory())},
-        {"rootPath", FS_CONVWSTRN(path.root_path())},
-        {"relativePath", FS_CONVWSTRN(path.relative_path())},
-        {"parentPath", FS_CONVWSTRN(path.parent_path())},
-        {"filename", path.filename()},
-        {"stem", path.stem()},
-        {"extension", path.extension()}
+        {"rootName", FS_CONVWSTRN(pathObj.root_name())},
+        {"rootDirectory", FS_CONVWSTRN(pathObj.root_directory())},
+        {"rootPath", FS_CONVWSTRN(pathObj.root_path())},
+        {"relativePath", FS_CONVWSTRN(pathObj.relative_path())},
+        {"parentPath", FS_CONVWSTRN(pathObj.parent_path())},
+        {"filename", pathObj.filename()},
+        {"stem", pathObj.stem()},
+        {"extension", pathObj.extension()}
     };
     output["returnValue"] = pathParts;
     output["success"] = true;
+    return output;
+}
+
+json getPermissions(const json &input) {
+    json output;
+    if(!helpers::hasRequiredFields(input, {"path"})) {
+        output["error"] = errors::makeMissingArgErrorPayload();
+        return output;
+    }
+    string path = input["path"].get<string>();
+    
+    fs::FileStats fileStats = fs::getStats(path);
+    if(fileStats.status != errors::NE_ST_OK) {
+        output["error"] = errors::makeErrorPayload(fileStats.status, path);
+        return output;
+    }
+    auto perms = filesystem::status(CONVSTR(path)).permissions();
+    
+    json permissions = {
+        {"all", filesystem::perms::all == (perms & filesystem::perms::all)},
+        {"ownerAll", filesystem::perms::owner_all == (perms & filesystem::perms::owner_all)},
+        {"ownerRead", filesystem::perms::none != (perms & filesystem::perms::owner_read)},
+        {"ownerWrite", filesystem::perms::none != (perms & filesystem::perms::owner_write)},
+        {"ownerExec", filesystem::perms::none != (perms & filesystem::perms::owner_exec)},
+        {"groupAll", filesystem::perms::group_all == (perms & filesystem::perms::group_all)},
+        {"groupRead", filesystem::perms::none != (perms & filesystem::perms::group_read)},
+        {"groupWrite", filesystem::perms::none != (perms & filesystem::perms::group_write)},
+        {"groupExec", filesystem::perms::none != (perms & filesystem::perms::group_exec)},
+        {"othersAll", filesystem::perms::others_all == (perms & filesystem::perms::others_all)},
+        {"othersRead", filesystem::perms::none != (perms & filesystem::perms::others_read)},
+        {"othersWrite", filesystem::perms::none != (perms & filesystem::perms::others_write)},
+        {"othersExec", filesystem::perms::none != (perms & filesystem::perms::others_exec)}
+    };
+    
+    output["returnValue"] = permissions;
+    output["success"] = true;
+    return output;
+}
+
+json setPermissions(const json &input) {
+    json output;
+    if(!helpers::hasRequiredFields(input, {"path"})) {
+        output["error"] = errors::makeMissingArgErrorPayload();
+        return output;
+    }
+    string path = input["path"].get<string>();
+    
+    error_code ec;
+    filesystem::perms permissions = filesystem::perms::none;
+    filesystem::perm_options permMode = filesystem::perm_options::replace;
+
+    if(helpers::hasField(input, "all") && input["all"].get<bool>())
+        permissions |= filesystem::perms::all;
+    if(helpers::hasField(input, "ownerAll") && input["ownerAll"].get<bool>())
+        permissions |= filesystem::perms::owner_all;
+    if(helpers::hasField(input, "groupAll") && input["groupAll"].get<bool>())
+        permissions |= filesystem::perms::group_all;
+    if(helpers::hasField(input, "othersAll") && input["othersAll"].get<bool>())
+        permissions |= filesystem::perms::others_all;
+    if(helpers::hasField(input, "ownerRead") && input["ownerRead"].get<bool>())
+        permissions |= filesystem::perms::owner_read;
+    if(helpers::hasField(input, "ownerWrite") && input["ownerWrite"].get<bool>())
+        permissions |= filesystem::perms::owner_write;
+    if(helpers::hasField(input, "ownerExec") && input["ownerExec"].get<bool>())
+        permissions |= filesystem::perms::owner_exec;
+    if(helpers::hasField(input, "groupRead") && input["groupRead"].get<bool>())
+        permissions |= filesystem::perms::group_read;
+    if(helpers::hasField(input, "groupWrite") && input["groupWrite"].get<bool>())
+        permissions |= filesystem::perms::group_write;
+    if(helpers::hasField(input, "groupExec") && input["groupExec"].get<bool>())
+        permissions |= filesystem::perms::group_exec;
+    if(helpers::hasField(input, "othersRead") && input["othersRead"].get<bool>())
+        permissions |= filesystem::perms::others_read;
+    if(helpers::hasField(input, "othersWrite") && input["othersWrite"].get<bool>())
+        permissions |= filesystem::perms::others_write;
+    if(helpers::hasField(input, "othersExec") && input["othersExec"].get<bool>())
+        permissions |= filesystem::perms::others_exec;
+
+    if(helpers::hasField(input, "mode")) {
+        string mode = input["mode"].get<string>();
+        if(mode == "ADD") permMode = filesystem::perm_options::add;
+        if(mode == "REPLACE") permMode = filesystem::perm_options::replace;
+        if(mode == "REMOVE") permMode = filesystem::perm_options::remove;
+    }
+    
+    filesystem::permissions(CONVSTR(path), permissions, permMode, ec);
+
+    if(!ec) { 
+        output["returnValue"] = permissions;
+        output["success"] = true;
+    }
+    else {
+        output["error"] = errors::makeErrorPayload(errors::NE_FS_UNLSTPR, path);
+    }
     return output;
 }
 
