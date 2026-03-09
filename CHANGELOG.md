@@ -6,6 +6,106 @@ rename `Unreleased` topic with the new version tag. Finally, create a new `Unrel
 
 ## Unreleased
 
+### API: computer
+- Implement `computer.getMousePosition(x, y)` to update the current mouse cursor position.
+- Implement `computer.setMouseGrabbing(grabbing; boolean)` to activate/deactivate confining the mouse cursor within the native app window. If `grabbing` is set to `true`, the mouse cursor always stays within the window boundaries, so this feature helps create interactive games and similar apps operated using the mouse.
+- Implement `computer.sendKey(keyCode, keyState)` to simulate keyboard events. App developers can use a platform-specific key code and states (`press`, `down`, and `up`) to simulate from simple single key strokes to complex key combinations:
+```js
+// Simulate letter 'a' press on GNU/Linux:
+await Neutralino.computer.sendKey(38)
+
+// Simulate Ctrl + V keyboard shortcut on GNU/Linux:
+await Neutralino.computer.sendKey(105, 'down')    // Hold right control
+await Neutralino.computer.sendKey(47, 'down')     // Hold letter 'v' 
+await Neutralino.computer.sendKey(47, 'up')       // Release letter 'v'
+await Neutralino.computer.sendKey(105, 'up')      // Release right control
+```
+
+## v6.5.0
+
+### Core: events
+- New window events: `windowMinimize`, `windowRestore`, `windowMaximize`, `windowFullScreenEnter`, and `windowFullScreenExit`
+
+### API: window
+- Add `window.setBorderless(bool)` to toggle borderless mode while the Neutralinojs app is running.
+
+### Configuration
+- Add `modes.chrome.browserBinary` option to set custom browser binary path under the chrome mode. If this field is specified, the framework will try to launch Chrome from there. If it fails, the framework will initiate the Chrome binary search as usual:
+```js
+// cross-platform
+"browserBinary": "/path/to/chrome/bin"
+
+// platform-specific path
+"browserBinaryLinux": "/usr/bin/google-chrome",
+"browserBinaryDarwin": "/Applications/Google Chrome.app",
+"browserBinaryWindows": "C:\\Programs\\Google Chrome\\chrome.exe"
+
+// cross-platform (with path constants)
+"browserBinary": "${NL_OSDATAPATH}/chrome/bin"
+"browserBinaryWindows": "${NL_OSDOWNLOADSPATH}/chrome.exe"
+```
+- Add the `modes.window.useLogicalPixels: true|false` option to activate DPI-aware sizing based on the operating system's display scale factor.
+- Add extra path constants support (early versions only supported `${NL_PATH}`) for the extensions command: `${NL_OSDATAPATH}`, `${NL_OSCACHEPATH}`, ... All supported path constants use this format: `${NL_OS<name>PATH}` where `<name>` is any accepted parameter (uppercased) to the `os.getPath(name)` function:
+```js
+"commandLinux": "${NL_OSDOWNLOADSPATH}/extensionBinary --load"
+``` 
+
+### Improvements/bugfixes
+- Fix issues with filter extension handling of the file dialogs API on Linux
+- Fix tray icon disappearing issue on Windows
+
+## v6.4.0
+
+### API: storage
+- Implement `storage.clear()` and `storage.removeData(key)` functions to remove saved storage data.
+
+### Improvements/bugfixes
+- Fix the draggable region not working issue on Windows.
+- Replace deprecated macOS API with suitable modern APIs in the codebase.
+- Static file server enhancements.
+- Improve `window.getPositon()` in macOS.
+- Save the correct window size and position when a maximized/minimized window is being closed on Windows.
+- Fix the window disappearing issue while restoring the window on Windows
+
+## v6.3.0
+
+### Single-executable mode
+Earlier, the Neutralinojs framework normally loaded resources either from the resources directory or the `resources.neu` file, and didn't offer a proper way to use embedded resource files in the app binary to allow developers to create single-executable apps. Now, the framework loads resources from the binary itself on all platforms if the app was built using the `neu build --embed-resources` CLI flag. This feature deprecates the `--load-dir-res` option and introduces the new `--res-mode=<mode>` option to choose the preferred resource loading mode from `embedded` (default), `bundle`, or `directory`. 
+
+The Neutralinojs single-executable feature internally uses the [`postject` library](https://github.com/nodejs/postject) to embed the `resources.neu` file into platform-specific binaries via the neu CLI and the `postject` library C header file to read the embedded resources during application runtime.
+
+### Configuration
+- Support the `window.skipTaskbar` boolean option to hide the application icon from the operating system taskbar/dock. This option can also be passed from the command line via the `--window-skip-taskbar=<true|false>` option.
+- Implement the `window.openInspectorOnStartup` boolean option to configure auto-opening the inspector window. This feature is also available via the `--window-open-inspector-on-startup=<true|false>` command-line flag.
+
+### Improvements/bugfixes
+- Fix WebView2 crash when Windows usernames or executable paths contain Unicode characters (e.g., äüö, Chinese characters). Replaced ANSI Windows APIs with Unicode equivalents and added proper null pointer checking for environment variable access.
+- Include details about missing parameter names in the error object of `NE_RT_NATRTER`.
+
+## v6.2.0
+
+### API: window
+- Add `Neutralino.window.print()` to display the native print dialog on all platforms. This was especially added since the macOS webview doesn't implement the `window.print()` function.
+- Introduce the `window.beginDrag()` function to trigger native window dragging. The new draggable region API implementation uses this function internally. 
+
+### API: filesystem
+- Add `filesystem.getJoinedPath(...paths: string[])` to create a single path by joining multiple path strings.
+- Add `filesystem.getNormalizedPath()` and `filesystem.getUnnormalizedPath()` functions, which make Windows paths look like Unix paths by replacing `\\` with `/` and revert normalized paths into Windows-specific paths respectively on the Windows platform. On non-Windows platforms, these functions return the same input strings.
+
+### Configuration
+- Implement the `window.webviewArgs` configuration option to pass additional browser arguments to the WebView2 instance on Windows:
+```js
+"modes": {
+  "window": {
+     // ....
+     "webviewArgs": "--user-agent=\"Custom user agent\""
+  }
+}
+```
+
+### Improvements/bugfixes
+- Display GUI error messages for webview initialization failures. i.e., if the WebView2 runtime is not installed on Windows and if the WebKitGTK library is not installed on GNU/Linux platforms.
+
 ## v6.1.0
 
 ### API: Native window main menu

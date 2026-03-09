@@ -49,10 +49,23 @@ json __validateStorageBucket(const string &key) {
     return output;
 }
 
+json __removeStorageBucket(const string &key) {
+    json output;
+    string filename = storagePath + "/" + key + NEU_STORAGE_EXT;
+    if(!filesystem::remove(CONVSTR(filename))) {
+        output["error"] = errors::makeErrorPayload(errors::NE_ST_STKEYRE, key);
+        return output;
+    }
+    
+    output["success"] = true;
+    output["message"] = "Storage key " + key + " was removed";
+    return output;
+}
+
 json getData(const json &input) {
     json output;
     if(!helpers::hasRequiredFields(input, {"key"})) {
-        output["error"] = errors::makeMissingArgErrorPayload();
+        output["error"] = errors::makeMissingArgErrorPayload("key");
         return output;
     }
     string key = input["key"].get<string>();
@@ -76,7 +89,7 @@ json getData(const json &input) {
 json setData(const json &input) {
     json output;
     if(!helpers::hasRequiredFields(input, {"key"})) {
-        output["error"] = errors::makeMissingArgErrorPayload();
+        output["error"] = errors::makeMissingArgErrorPayload("key");
         return output;
     }
     string key = input["key"].get<string>();
@@ -89,14 +102,13 @@ json setData(const json &input) {
     SetFileAttributesA(storagePath.c_str(), FILE_ATTRIBUTE_HIDDEN);
     #endif
 
-    string filename = storagePath + "/" + key + NEU_STORAGE_EXT;
     if(!helpers::hasField(input, "data")) {
-        filesystem::remove(CONVSTR(filename));
+        return __removeStorageBucket(key);
     }
     else {
         fs::FileWriterOptions fileWriterOptions;
         fileWriterOptions.data = input["data"].get<string>();
-        fileWriterOptions.filename = filename;
+        fileWriterOptions.filename = storagePath + "/" + key + NEU_STORAGE_EXT;;
 
         if(!fs::writeFile(fileWriterOptions)) {
             output["error"] = errors::makeErrorPayload(errors::NE_ST_STKEYWE, key);
@@ -105,6 +117,20 @@ json setData(const json &input) {
     }
     output["success"] = true;
     return output;
+}
+
+json removeData(const json &input) {
+    json output;
+    if(!helpers::hasRequiredFields(input, {"key"})) {
+        output["error"] = errors::makeMissingArgErrorPayload("key");
+        return output;
+    }
+    string key = input["key"].get<string>();
+    json errorPayload = __validateStorageBucket(key);
+    if(!errorPayload.is_null())
+        return errorPayload;
+
+    return __removeStorageBucket(key);
 }
 
 json getKeys(const json &input) {
@@ -126,6 +152,17 @@ json getKeys(const json &input) {
     output["success"] = true;
     return output;
 }
+
+json clear(const json &input) {
+    json output;
+
+    filesystem::remove_all(CONVSTR(storagePath));
+    
+    output["success"] = true;
+    output["message"] = "Storage was cleared";
+    return output;
+}
+
 
 } // namespace controllers
 

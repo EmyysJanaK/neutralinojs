@@ -1,7 +1,7 @@
 {
     "std": "c++17",
     "name": "Neutralinojs",
-    "version": "6.1.0",
+    "version": "6.6.0",
     "output": "./bin/neutralino-${BZ_OS}_${BZ_TARGET_ARCH}",
     "include": {
         "*": [
@@ -44,7 +44,8 @@
         "windows": [
             "lib/tinyprocess/process_win.cpp",
             "lib/clip/clip_win.cpp",
-            "lib/efsw/src/efsw/platform/win/*.cpp"
+            "lib/efsw/src/efsw/platform/win/*.cpp",
+            "lib/postject/windows_dummy.res"
         ]
     },
     "options": {
@@ -61,7 +62,8 @@
             "-Wno-deprecated-declarations",
             "-framework WebKit",
             "-framework Cocoa",
-            "-Os"
+            "-Os",
+            "-mmacosx-version-min=11.01"
         ],
         "windows": [
             "/utf-8",

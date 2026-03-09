@@ -4,6 +4,8 @@
 #include <regex>
 
 #if defined(__linux__) || defined(__FreeBSD__)
+#include <type_traits>
+#include <dlfcn.h>
 #include <gtk/gtk.h>
 #include <glib.h>
 #include <gdk-pixbuf/gdk-pixbuf.h>
@@ -13,6 +15,11 @@
 #include <CoreFoundation/Corefoundation.h>
 #include <CoreGraphics/CGDisplayConfiguration.h>
 #include <CoreGraphics/CGWindow.h>
+
+#if defined(__APPLE__) && MAC_OS_X_VERSION_MIN_REQUIRED >= 120300
+#import <ScreenCaptureKit/ScreenCaptureKit.h>
+#endif
+
 #define NSBaseWindowLevel 0
 #define NSFloatingWindowLevel 5
 #define NSWindowStyleMaskFullScreen 16384
@@ -28,6 +35,9 @@
 #include <winuser.h>
 #pragma comment(lib, "Gdiplus.lib")
 #pragma comment(lib, "WebView2LoaderStatic.lib")
+#include "webview2.h"
+#include <wrl.h>
+#include <ShlObj_core.h>
 #endif
 
 #include "lib/json/json.hpp"
@@ -43,6 +53,7 @@
 #include "api/events/events.h"
 #include "api/fs/fs.h"
 #include "api/debug/debug.h"
+#include "api/computer/computer.h"
 
 using namespace std;
 using json = nlohmann::json;
@@ -95,21 +106,37 @@ void windowStateChange(int state) {
             #if defined(__linux__) || defined(__FreeBSD__)
                 isGtkWindowFullScreen = true;
             #endif
+            events::dispatch("windowFullScreenEnter", nullptr);
             break;
         case WEBVIEW_WINDOW_UNFULLSCREEN:
             #if defined(__linux__) || defined(__FreeBSD__)
                 isGtkWindowFullScreen = false;
             #endif
+            events::dispatch("windowFullScreenExit", nullptr);
             break;
         case WEBVIEW_WINDOW_MINIMIZED:
             #if defined(__linux__) || defined(__FreeBSD__)
                 isGtkWindowMinimized = true;
             #endif
+            events::dispatch("windowMinimize", nullptr);
             break;
-        case WEBVIEW_WINDOW_UNMINIMIZED:
+        case WEBVIEW_WINDOW_RESTORED:
             #if defined(__linux__) || defined(__FreeBSD__)
                 isGtkWindowMinimized = false;
             #endif
+            events::dispatch("windowRestore", nullptr);
+            break;
+        case WEBVIEW_WINDOW_SHOW:
+            events::dispatch("windowShow", nullptr);
+            break;
+        case WEBVIEW_WINDOW_HIDE:
+            events::dispatch("windowHide", nullptr);
+            break;
+        case WEBVIEW_WINDOW_MAXIMIZE:
+            events::dispatch("windowMaximize", nullptr);
+            break;
+        case WEBVIEW_WINDOW_ACTIVATE:
+            events::dispatch("windowActivate", nullptr);
             break;
     }
 }
@@ -149,15 +176,8 @@ pair<int, int> __getCenterPos(bool useConfigSizes = false) {
 
 #if defined(__APPLE__)
 CGRect __getWindowRect() {
-    // "frame"_sel is the easiest way, but it crashes
-    // So, this is a workaround with low-level APIs.
-    long winId = ((long(*)(id, SEL))objc_msgSend)(windowHandle, "windowNumber"_sel);
-    auto winInfoArray = CGWindowListCopyWindowInfo(kCGWindowListOptionIncludingWindow, winId);
-    auto winInfo = CFArrayGetValueAtIndex(winInfoArray, 0);
-    auto winBounds = CFDictionaryGetValue((CFDictionaryRef) winInfo, kCGWindowBounds);
-
-    CGRect winPos;
-    CGRectMakeWithDictionaryRepresentation((CFDictionaryRef) winBounds, &winPos);
+    CGRect winPos = ((CGRect (*)(id, SEL))objc_msgSend)(
+        (id) windowHandle, "frame"_sel);
     return winPos;
 }
 #endif
@@ -211,6 +231,26 @@ bool __getEncoderClsid(const WCHAR *format, CLSID *pClsid) {
 }
 #endif
 
+double __getScaleFactor() {
+	#if defined(_WIN32)
+    return GetDpiForSystem() / 96.0;
+
+	#elif defined(__APPLE__)
+    id screen = ((id (*)(id, SEL))objc_msgSend)(
+        "NSScreen"_cls, "mainScreen"_sel);
+    return ((double (*)(id, SEL))objc_msgSend)(
+        screen, "backingScaleFactor"_sel);
+
+	#elif defined(__linux__) || defined(__FreeBSD__)
+    GdkDisplay* display = gdk_display_get_default();
+    GdkMonitor* monitor = gdk_display_get_primary_monitor(display);
+    return gdk_monitor_get_scale_factor(monitor);
+
+	#else
+    return 1.0;
+	#endif
+}
+
 json __sizeOptionsToJson(const window::SizeOptions &opt) {
     json output = {
         {"width", opt.width},
@@ -231,6 +271,17 @@ void __saveWindowProps() {
     options["x"] = pos.first;
     options["y"] = pos.second;
     options["maximize"] = window::isMaximized();
+    
+    #if defined(_WIN32)
+    if(IsZoomed(windowHandle)) {
+        WINDOWPLACEMENT wp = { sizeof(WINDOWPLACEMENT) };
+        GetWindowPlacement(windowHandle, &wp);
+        options["width"] = wp.rcNormalPosition.right - wp.rcNormalPosition.left;
+        options["height"] = wp.rcNormalPosition.bottom - wp.rcNormalPosition.top;
+        options["x"] = wp.rcNormalPosition.left;
+        options["y"] = wp.rcNormalPosition.top;
+    }
+    #endif
 
     filesystem::create_directories(CONVSTR(settings::joinAppDataPath("/.tmp")));
     fs::FileWriterOptions writerOptions = { settings::joinAppDataPath(NEU_WIN_CONFIG_FILE), helpers::jsonToString(options) };
@@ -250,8 +301,19 @@ bool __loadSavedWindowProps() {
         windowProps.maximize = options["maximize"].get<bool>();
         windowProps.sizeOptions.width = options["width"].get<int>();
         windowProps.sizeOptions.height = options["height"].get<int>();
+
+        #if defined(_WIN32)
+        WINDOWPLACEMENT wp = {sizeof(WINDOWPLACEMENT)};
+        wp.rcNormalPosition.left = windowProps.x;
+        wp.rcNormalPosition.top = windowProps.y;
+        wp.rcNormalPosition.right = windowProps.x + windowProps.sizeOptions.width;
+        wp.rcNormalPosition.bottom = windowProps.y + windowProps.sizeOptions.height;
+        wp.showCmd = SW_SHOWNORMAL;
+
+        SetWindowPlacement(windowHandle, &wp);
+        #endif
     }
-    catch(exception e) {
+    catch(const exception& e) {
         debug::log(debug::LogTypeError, errors::makeErrorMsg(errors::NE_CF_UNBLWCF, string(NEU_WIN_CONFIG_FILE)));
         return false;
     }
@@ -483,6 +545,155 @@ GtkMenuShell* __createMenu(const json &menu, bool root) {
 }
 #endif
 
+window::SizeOptions __jsonToSizeOptions(const json &input, bool useDefaultRect = false) {
+    window::SizeOptions sizeOptions;
+
+    if(useDefaultRect) {
+        sizeOptions.width = 800;
+        sizeOptions.height = 600;
+    }
+
+    if(helpers::hasField(input, "width"))
+        sizeOptions.width = input["width"].get<int>();
+
+    if(helpers::hasField(input, "height"))
+        sizeOptions.height = input["height"].get<int>();
+
+    if(helpers::hasField(input, "minWidth"))
+        sizeOptions.minWidth = input["minWidth"].get<int>();
+
+    if(helpers::hasField(input, "minHeight"))
+        sizeOptions.minHeight = input["minHeight"].get<int>();
+
+    if(helpers::hasField(input, "maxWidth"))
+        sizeOptions.maxWidth = input["maxWidth"].get<int>();
+
+    if(helpers::hasField(input, "maxHeight"))
+        sizeOptions.maxHeight = input["maxHeight"].get<int>();
+
+    if(helpers::hasField(input, "resizable"))
+        sizeOptions.resizable = input["resizable"].get<bool>();
+    return sizeOptions;
+}
+
+void __injectClientLibrary() {
+    json options = settings::getConfig();
+    json jClientLibrary = options["cli"]["clientLibrary"];
+    if(!jClientLibrary.is_null()) {
+        string clientLibPath = jClientLibrary.get<string>();
+        fs::FileReaderResult fileReaderResult = resources::getFile(clientLibPath);
+        if(fileReaderResult.status == errors::NE_ST_OK) {
+            nativeWindow->init(settings::getGlobalVars() + "var NL_CINJECTED = true;" + 
+                fileReaderResult.data);
+        }
+    }
+}
+
+void __injectScript() {
+    json jInjectScript = settings::getOptionForCurrentMode("injectScript");
+    if(!jInjectScript.is_null()) {
+        string injectScript = jInjectScript.get<string>();
+        fs::FileReaderResult fileReaderResult = resources::getFile(injectScript);
+        if(fileReaderResult.status == errors::NE_ST_OK) {
+            nativeWindow->init("var NL_SINJECTED = true;" + fileReaderResult.data);
+        }
+    }
+}
+
+bool __createWindow() {
+    savedState = windowProps.useSavedState && __loadSavedWindowProps();
+
+    nativeWindow = new webview::webview(windowProps.enableInspector, windowProps.openInspectorOnStartup, 
+        nullptr, windowProps.transparent, windowProps.webviewArgs);
+    
+    if(nativeWindow->get_init_code() == 1) {
+        return false;
+    }
+
+    nativeWindow->set_title(windowProps.title);
+    if(windowProps.extendUserAgentWith != "") {
+        nativeWindow->extend_user_agent(windowProps.extendUserAgentWith);
+    }
+
+    int width = windowProps.sizeOptions.width;
+    int height = windowProps.sizeOptions.height;
+    if(windowProps.useLogicalPixels) {
+        double scale = __getScaleFactor();
+        if(width > 0)  width  = (int)(width  * scale);
+        if(height > 0) height = (int)(height * scale);
+    }
+
+    nativeWindow->set_size(
+    width,
+    height,
+    windowProps.sizeOptions.minWidth,
+    windowProps.sizeOptions.minHeight,
+    windowProps.sizeOptions.maxWidth,
+    windowProps.sizeOptions.maxHeight,
+    windowProps.sizeOptions.resizable
+);
+
+    nativeWindow->setEventHandler(&window::handlers::windowStateChange);
+
+    if(windowProps.injectGlobals) 
+        nativeWindow->init(settings::getGlobalVars() + "var NL_GINJECTED = true;");
+
+    if(windowProps.injectClientLibrary)
+        __injectClientLibrary();
+
+    if(windowProps.injectScript != "")
+        __injectScript();
+
+    #if defined(__linux__) || defined(__FreeBSD__)
+    windowHandle = (GtkWidget*) nativeWindow->window();
+
+    #elif defined(__APPLE__)
+    windowHandle = (id) nativeWindow->window();
+    ((void (*)(id, SEL, bool))objc_msgSend)((id) windowHandle,
+                "setHasShadow:"_sel, true);
+
+    #elif defined(_WIN32)
+    windowHandle = (HWND) nativeWindow->window();
+    #endif
+
+    #if !defined(_WIN32)
+    if(!window::isSavedStateLoaded() && windowProps.center)
+        window::center(true);
+    else
+        window::move(windowProps.x, windowProps.y);
+    #endif
+
+    if(windowProps.hidden)
+        window::hide();
+
+    #if defined(_WIN32)
+    if (!windowProps.hidden && __isFakeHidden())
+		__undoFakeHidden();
+    #endif
+
+    if(windowProps.maximize)
+        window::maximize();
+
+    if(windowProps.fullScreen)
+        window::setFullScreen();
+
+    if(windowProps.icon != "")
+        window::setIcon(windowProps.icon);
+
+    if(windowProps.alwaysOnTop)
+        window::setAlwaysOnTop(true);
+
+    if(windowProps.borderless)
+        window::setBorderless(true);
+
+    if(windowProps.skipTaskbar)
+        window::setSkipTaskbar(true);
+
+    nativeWindow->navigate(windowProps.url);
+
+    return true;
+}
+
 void _close(int exitCode) {
     if(nativeWindow) {
         if(windowProps.useSavedState) {
@@ -494,10 +705,6 @@ void _close(int exitCode) {
         #endif
         delete nativeWindow;
     }
-}
-
-NEU_W_HANDLE getWindowHandle() {
-    return windowHandle;
 }
 
 bool isSavedStateLoaded() {
@@ -582,6 +789,8 @@ void show() {
     if (__isFakeHidden())
         __undoFakeHidden();
     #endif
+
+    window::handlers::windowStateChange(WEBVIEW_WINDOW_SHOW);
 }
 
 void hide() {
@@ -595,6 +804,8 @@ void hide() {
     #elif defined(_WIN32)
     ShowWindow(windowHandle, SW_HIDE);
     #endif
+
+    window::handlers::windowStateChange(WEBVIEW_WINDOW_HIDE);
 }
 
 bool isFullScreen() {
@@ -641,6 +852,7 @@ void setFullScreen() {
                 r.bottom - r.top,
                 SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
     isWinWindowFullScreen = true;
+    window::handlers::windowStateChange(WEBVIEW_WINDOW_FULLSCREEN);
     #endif
 }
 
@@ -659,6 +871,7 @@ void exitFullScreen() {
                 savedRect.bottom - savedRect.top,
                 SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
     isWinWindowFullScreen = false;
+    window::handlers::windowStateChange(WEBVIEW_WINDOW_UNFULLSCREEN);
     #endif
 }
 
@@ -727,23 +940,55 @@ void move(int x, int y) {
     #endif
 }
 
+void beginDragNative() {
+
+    #if defined(__linux__) || defined(__FreeBSD__)
+    auto mousePos = computer::getMousePosition();
+    gtk_window_begin_move_drag(GTK_WINDOW(windowHandle), 1, mousePos.first, mousePos.second, GDK_CURRENT_TIME);
+
+    #elif defined(_WIN32)
+    ReleaseCapture();
+    SendMessage(windowHandle, WM_SYSCOMMAND, SC_MOVE | HTCAPTION, 0);
+
+    #elif defined(__APPLE__)
+    ((void (*)(id, SEL, id))objc_msgSend)(windowHandle,
+        "performWindowDragWithEvent:"_sel, 
+        ((id (*)(id, SEL))objc_msgSend)(windowHandle,
+        "currentEvent"_sel)
+        );
+    #endif
+}
+
 window::SizeOptions getSize() {
     int width, height = 0;
     #if defined(__linux__) || defined(__FreeBSD__)
     gtk_window_get_size(GTK_WINDOW(windowHandle),
                         &width, &height);
     #elif defined(__APPLE__)
-    CGRect winPos = __getWindowRect();
+    CGRect frameRect = __getWindowRect();
 
-    width = winPos.size.width;
-    height = winPos.size.height;
+    width = frameRect.size.width;
+    height = frameRect.size.height;
 
     #elif defined(_WIN32)
-    RECT winPos;
-    GetWindowRect(windowHandle, &winPos);
-    width = winPos.right - winPos.left;
-    height = winPos.bottom - winPos.top;
+    if(IsIconic(windowHandle)) {
+        WINDOWPLACEMENT wp = { sizeof(WINDOWPLACEMENT) };
+        GetWindowPlacement(windowHandle, &wp);
+        width = wp.rcNormalPosition.right - wp.rcNormalPosition.left;
+        height = wp.rcNormalPosition.bottom - wp.rcNormalPosition.top;
+    }
+    else {
+        RECT winPos;
+        GetWindowRect(windowHandle, &winPos);
+        width = winPos.right - winPos.left;
+        height = winPos.bottom - winPos.top;
+    }
     #endif
+    if(windowProps.useLogicalPixels) {
+        double scale = __getScaleFactor();
+        width = (int)(width / scale);
+        height = (int)(height / scale);
+   }
 
     windowProps.sizeOptions.width = width;
     windowProps.sizeOptions.height = height;
@@ -756,15 +1001,26 @@ pair<int, int> getPosition() {
     gdk_window_get_root_origin(gtk_widget_get_window(windowHandle), &x, &y);
 
     #elif defined(__APPLE__)
-    CGRect winPos = __getWindowRect();
-    x = winPos.origin.x;
-    y = winPos.origin.y;
+    CGRect frameRect = __getWindowRect();
+    auto displayId = CGMainDisplayID();
+    int height = CGDisplayPixelsHigh(displayId);
+
+    x = frameRect.origin.x;
+    y = height - frameRect.origin.y - frameRect.size.height;
 
     #elif defined(_WIN32)
-    RECT winPos;
-    GetWindowRect(windowHandle, &winPos);
-    x = winPos.left;
-    y = winPos.top;
+    if(IsIconic(windowHandle)) {
+        WINDOWPLACEMENT wp = { sizeof(WINDOWPLACEMENT) };
+        GetWindowPlacement(windowHandle, &wp);
+        x = wp.rcNormalPosition.left;
+        y = wp.rcNormalPosition.top;
+    }
+    else {
+        RECT winPos;
+        GetWindowRect(windowHandle, &winPos);
+        x = winPos.left;
+        y = winPos.top;
+    }
     #endif
 
     return make_pair(x, y);
@@ -787,21 +1043,45 @@ void setAlwaysOnTop(bool onTop) {
     #endif
 }
 
-void setBorderless() {
+void setBorderless(bool borderless) {
     #if defined(__linux__) || defined(__FreeBSD__)
-    gtk_window_set_decorated(GTK_WINDOW(windowHandle), false);
+    gtk_window_set_decorated(GTK_WINDOW(windowHandle), !borderless);
     #elif defined(__APPLE__)
     unsigned long windowStyleMask = ((unsigned long (*)(id, SEL))objc_msgSend)(
         (id) windowHandle, "styleMask"_sel);
-    windowStyleMask &= ~NSWindowStyleMaskTitled;
+    windowStyleMask = borderless ? (windowStyleMask & ~NSWindowStyleMaskTitled) : 
+                    (windowStyleMask | NSWindowStyleMaskTitled);
     ((void (*)(id, SEL, int))objc_msgSend)((id) windowHandle,
             "setStyleMask:"_sel, windowStyleMask);
     #elif defined(_WIN32)
     DWORD currentStyle = GetWindowLong(windowHandle, GWL_STYLE);
-    currentStyle &= ~(WS_CAPTION | WS_THICKFRAME);
+    currentStyle = borderless ? (currentStyle & ~(WS_CAPTION | WS_THICKFRAME)) : 
+                    (currentStyle | (WS_CAPTION | WS_THICKFRAME));
     SetWindowLong(windowHandle, GWL_STYLE, currentStyle);
     SetWindowPos(windowHandle, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE |
                     SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+    #endif
+}
+
+void setSkipTaskbar(bool skip) {
+    #if defined(__linux__) || defined(__FreeBSD__)
+    gdk_window_set_skip_taskbar_hint(gtk_widget_get_window(windowHandle), skip);
+    #elif defined(__APPLE__)
+    id app = ((id(*)(id, SEL))objc_msgSend)("NSApplication"_cls,
+                                            "sharedApplication"_sel);
+    ((void (*)(id, SEL, long))objc_msgSend)(
+        app, "setActivationPolicy:"_sel, skip ? NSApplicationActivationPolicyAccessory : NSApplicationActivationPolicyRegular);
+    #elif defined(_WIN32)
+    Microsoft::WRL::ComPtr<ITaskbarList> taskbar;
+    if(FAILED(CoCreateInstance(CLSID_TaskbarList, nullptr,
+                                    CLSCTX_INPROC_SERVER,
+                                    IID_PPV_ARGS(&taskbar))) ||
+        FAILED(taskbar->HrInit()))
+        return;
+    if(skip)
+        taskbar->DeleteTab(windowHandle);
+    else
+        taskbar->AddTab(windowHandle);
     #endif
 }
 
@@ -820,7 +1100,38 @@ bool snapshot(const string &filename) {
     clientRect.origin.y +=  frameRect.size.height - clientRect.size.height;
 
     long winId = ((long(*)(id, SEL))objc_msgSend)(windowHandle, "windowNumber"_sel);
-    CGImageRef imgRef = CGWindowListCreateImage(clientRect, kCGWindowListOptionIncludingWindow, winId, kCGWindowImageBoundsIgnoreFraming); 
+    
+CGImageRef imgRef = nil;
+
+#if defined(__APPLE__) && MAC_OS_X_VERSION_MIN_REQUIRED >= 120300
+    // Modern ScreenCaptureKit API (macOS 12.3+)
+    __block CGImageRef screenshotImage = nil;
+    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+    
+    SCContentFilter *filter = [[SCContentFilter alloc] initWithDesktopIndependentWindow:
+        [SCWindow windowWithWindowID:winId]];
+    
+    SCStreamConfiguration *config = [[SCStreamConfiguration alloc] init];
+    config.scalesToFit = NO;
+    
+    [SCScreenshotManager captureImageWithFilter:filter
+                                  configuration:config
+                              completionHandler:^(CGImageRef capturedImage, NSError *error) {
+        if (error == nil && capturedImage != NULL) {
+            
+            screenshotImage = CGImageCreateWithImageInRect(capturedImage, clientRect);
+        }
+        dispatch_semaphore_signal(semaphore);  
+    }];
+    
+    dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, 1 * NSEC_PER_SEC));
+    imgRef = screenshotImage;
+
+#else
+    // Fallback for macOS < 12.3
+    imgRef = CGWindowListCreateImage(clientRect, kCGWindowListOptionIncludingWindow, winId, kCGWindowImageBoundsIgnoreFraming);
+#endif
+
       
     id screenshot =
         ((id (*)(id, SEL))objc_msgSend)("NSBitmapImageRep"_cls, "alloc"_sel);
@@ -902,132 +1213,95 @@ void setMainMenu(const json &menu) {
     #endif
 }
 
-namespace controllers {
+bool init(const json &windowOptions) {
+    json output;
 
-void __injectClientLibrary() {
-    json options = settings::getConfig();
-    json jClientLibrary = options["cli"]["clientLibrary"];
-    if(!jClientLibrary.is_null()) {
-        string clientLibPath = jClientLibrary.get<string>();
-        fs::FileReaderResult fileReaderResult = resources::getFile(clientLibPath);
-        if(fileReaderResult.status == errors::NE_ST_OK) {
-            nativeWindow->init(settings::getGlobalVars() + "var NL_CINJECTED = true;" + 
-                fileReaderResult.data);
-        }
+    windowProps.sizeOptions = __jsonToSizeOptions(windowOptions, true);
+
+    if(helpers::hasField(windowOptions, "x"))
+        windowProps.x = windowOptions["x"].get<int>();
+    
+    if(helpers::hasField(windowOptions, "useLogicalPixels")) {
+        windowProps.useLogicalPixels = windowOptions["useLogicalPixels"].get<bool>();
     }
-}
 
-void __injectScript() {
-    json jInjectScript = settings::getOptionForCurrentMode("injectScript");
-    if(!jInjectScript.is_null()) {
-        string injectScript = jInjectScript.get<string>();
-        fs::FileReaderResult fileReaderResult = resources::getFile(injectScript);
-        if(fileReaderResult.status == errors::NE_ST_OK) {
-            nativeWindow->init("var NL_SINJECTED = true;" + fileReaderResult.data);
-        }
+
+    if(helpers::hasField(windowOptions, "y"))
+        windowProps.y = windowOptions["y"].get<int>();
+
+    if(helpers::hasField(windowOptions, "fullScreen"))
+        windowProps.fullScreen = windowOptions["fullScreen"].get<bool>();
+
+    if(helpers::hasField(windowOptions, "alwaysOnTop"))
+        windowProps.alwaysOnTop = windowOptions["alwaysOnTop"].get<bool>();
+
+    if(helpers::hasField(windowOptions, "title"))
+        windowProps.title = windowOptions["title"].get<string>();
+
+    if(helpers::hasField(windowOptions, "url"))
+        windowProps.url = windowOptions["url"].get<string>();
+
+    if(helpers::hasField(windowOptions, "icon"))
+        windowProps.icon = windowOptions["icon"].get<string>();
+
+    if(helpers::hasField(windowOptions, "extendUserAgentWith"))
+        windowProps.extendUserAgentWith = windowOptions["extendUserAgentWith"].get<string>();
+
+    if(helpers::hasField(windowOptions, "injectScript"))
+        windowProps.injectScript = windowOptions["injectScript"].get<string>();
+
+    if(helpers::hasField(windowOptions, "enableInspector"))
+        windowProps.enableInspector = windowOptions["enableInspector"].get<bool>();
+
+    if(helpers::hasField(windowOptions, "openInspectorOnStartup"))
+        windowProps.openInspectorOnStartup = windowOptions["openInspectorOnStartup"].get<bool>();
+
+    if(helpers::hasField(windowOptions, "borderless"))
+        windowProps.borderless = windowOptions["borderless"].get<bool>();
+
+    if(helpers::hasField(windowOptions, "maximize"))
+        windowProps.maximize = windowOptions["maximize"].get<bool>();
+
+    if(helpers::hasField(windowOptions, "hidden"))
+        windowProps.hidden = windowOptions["hidden"].get<bool>();
+
+    if(helpers::hasField(windowOptions, "center"))
+        windowProps.center = windowOptions["center"].get<bool>();
+
+    if(helpers::hasField(windowOptions, "transparent"))
+        windowProps.transparent = windowOptions["transparent"].get<bool>();
+
+    if(helpers::hasField(windowOptions, "exitProcessOnClose"))
+        windowProps.exitProcessOnClose = windowOptions["exitProcessOnClose"].get<bool>();
+
+    if(helpers::hasField(windowOptions, "useSavedState"))
+        windowProps.useSavedState = windowOptions["useSavedState"].get<bool>();
+
+    if(helpers::hasField(windowOptions, "injectGlobals"))
+        windowProps.injectGlobals = windowOptions["injectGlobals"].get<bool>();
+
+    if(helpers::hasField(windowOptions, "injectClientLibrary"))
+        windowProps.injectClientLibrary = windowOptions["injectClientLibrary"].get<bool>();
+
+    if(helpers::hasField(windowOptions, "webviewArgs"))
+        windowProps.webviewArgs = windowOptions["webviewArgs"].get<string>();
+
+    if(helpers::hasField(windowOptions, "skipTaskbar"))
+        windowProps.skipTaskbar = windowOptions["skipTaskbar"].get<bool>();
+
+    if(!__createWindow()) {
+        return false;
     }
-}
 
-void __createWindow() {
-    savedState = windowProps.useSavedState && __loadSavedWindowProps();
-
-    nativeWindow = new webview::webview(windowProps.enableInspector, nullptr, windowProps.transparent);
-    nativeWindow->set_title(windowProps.title);
-    if(windowProps.extendUserAgentWith != "") {
-        nativeWindow->extend_user_agent(windowProps.extendUserAgentWith);
-    }
-    nativeWindow->set_size(windowProps.sizeOptions.width,
-                    windowProps.sizeOptions.height,
-                    windowProps.sizeOptions.minWidth, windowProps.sizeOptions.minHeight,
-                    windowProps.sizeOptions.maxWidth, windowProps.sizeOptions.maxHeight,
-                    windowProps.sizeOptions.resizable);
-    nativeWindow->setEventHandler(&window::handlers::windowStateChange);
-
-    if(windowProps.injectGlobals) 
-        nativeWindow->init(settings::getGlobalVars() + "var NL_GINJECTED = true;");
-
-    if(windowProps.injectClientLibrary)
-        __injectClientLibrary();
-
-    if(windowProps.injectScript != "")
-        __injectScript();
-
-    #if defined(__linux__) || defined(__FreeBSD__)
-    windowHandle = (GtkWidget*) nativeWindow->window();
-
-    #elif defined(__APPLE__)
-    windowHandle = (id) nativeWindow->window();
-    ((void (*)(id, SEL, bool))objc_msgSend)((id) windowHandle,
-                "setHasShadow:"_sel, true);
-
-    #elif defined(_WIN32)
-    windowHandle = (HWND) nativeWindow->window();
-    #endif
-
-    #if !defined(_WIN32)
-    if(!window::isSavedStateLoaded() && windowProps.center)
-        window::center(true);
-    else
-        window::move(windowProps.x, windowProps.y);
-    #endif
-
-    if(windowProps.maximize)
-        window::maximize();
-
-    if(windowProps.hidden)
-        window::hide();
-
-    #if defined(_WIN32)
-    if (!windowProps.hidden && __isFakeHidden())
-		__undoFakeHidden();
-    #endif
-
-    if(windowProps.fullScreen)
-        window::setFullScreen();
-
-    if(windowProps.icon != "")
-        window::setIcon(windowProps.icon);
-
-    if(windowProps.alwaysOnTop)
-        window::setAlwaysOnTop(true);
-
-    if(windowProps.borderless)
-        window::setBorderless();
-
-    nativeWindow->navigate(windowProps.url);
     nativeWindow->run();
+    return true;
 }
 
-window::SizeOptions __jsonToSizeOptions(const json &input, bool useDefaultRect = false) {
-    window::SizeOptions sizeOptions;
-
-    if(useDefaultRect) {
-        sizeOptions.width = 800;
-        sizeOptions.height = 600;
-    }
-
-    if(helpers::hasField(input, "width"))
-        sizeOptions.width = input["width"].get<int>();
-
-    if(helpers::hasField(input, "height"))
-        sizeOptions.height = input["height"].get<int>();
-
-    if(helpers::hasField(input, "minWidth"))
-        sizeOptions.minWidth = input["minWidth"].get<int>();
-
-    if(helpers::hasField(input, "minHeight"))
-        sizeOptions.minHeight = input["minHeight"].get<int>();
-
-    if(helpers::hasField(input, "maxWidth"))
-        sizeOptions.maxWidth = input["maxWidth"].get<int>();
-
-    if(helpers::hasField(input, "maxHeight"))
-        sizeOptions.maxHeight = input["maxHeight"].get<int>();
-
-    if(helpers::hasField(input, "resizable"))
-        sizeOptions.resizable = input["resizable"].get<bool>();
-    return sizeOptions;
+NEU_W_HANDLE getHandle() {
+    return windowHandle;
 }
+
+namespace controllers {
 
 json setTitle(const json &input) {
     json output;
@@ -1165,8 +1439,11 @@ json focus(const json &input) {
     #if defined(__linux__) || defined(__FreeBSD__)
     gtk_window_present(GTK_WINDOW(windowHandle));
     #elif defined(__APPLE__)
+    ((void (*)(id, SEL))objc_msgSend)(
+        ((id(*)(id, SEL))objc_msgSend)("NSApplication"_cls, "sharedApplication"_sel),
+        "activate"_sel);
     ((void (*)(id, SEL, id))objc_msgSend)((id) windowHandle,
-            "orderFront:"_sel, NULL);
+            "makeKeyAndOrderFront:"_sel, NULL);
     #elif defined(_WIN32)
     SetForegroundWindow(windowHandle);
     #endif
@@ -1177,7 +1454,7 @@ json focus(const json &input) {
 json setIcon(const json &input) {
     json output;
     if(!helpers::hasRequiredFields(input, {"icon"})) {
-        output["error"] = errors::makeMissingArgErrorPayload();
+        output["error"] = errors::makeMissingArgErrorPayload("icon");
         return output;
     }
     string icon = input["icon"].get<string>();
@@ -1188,8 +1465,9 @@ json setIcon(const json &input) {
 
 json move(const json &input) {
     json output;
-    if(!helpers::hasRequiredFields(input, {"x", "y"})) {
-        output["error"] = errors::makeMissingArgErrorPayload();
+    const auto missingRequiredField = helpers::missingRequiredField(input, {"x", "y"});
+    if(missingRequiredField) {
+        output["error"] = errors::makeMissingArgErrorPayload(missingRequiredField.value());
         return output;
     }
     int x = input["x"].get<int>();
@@ -1209,13 +1487,30 @@ json center(const json &input) {
 json setSize(const json &input) {
     json output;
     windowProps.sizeOptions = __jsonToSizeOptions(input);
-    nativeWindow->set_size(windowProps.sizeOptions.width, windowProps.sizeOptions.height,
-                    windowProps.sizeOptions.minWidth, windowProps.sizeOptions.minHeight,
-                    windowProps.sizeOptions.maxWidth, windowProps.sizeOptions.maxHeight,
-                    windowProps.sizeOptions.resizable);
+
+    int width = windowProps.sizeOptions.width;
+    int height = windowProps.sizeOptions.height;
+
+    if(windowProps.useLogicalPixels) {
+        double scale = __getScaleFactor();
+        if(width > 0)  width  = (int)(width  * scale);
+        if(height > 0) height = (int)(height * scale);
+    }
+
+    nativeWindow->set_size(
+        width,
+        height,
+        windowProps.sizeOptions.minWidth,
+        windowProps.sizeOptions.minHeight,
+        windowProps.sizeOptions.maxWidth,
+        windowProps.sizeOptions.maxHeight,
+        windowProps.sizeOptions.resizable
+    );
+
     output["success"] = true;
     return output;
 }
+
 
 json getSize(const json &input) {
     json output;
@@ -1237,6 +1532,17 @@ json setAlwaysOnTop(const json &input) {
     return output;
 }
 
+json setBorderless(const json &input) {
+    json output;
+    bool borderless = true;
+    if(helpers::hasField(input, "borderless")) {
+        borderless = input["borderless"].get<bool>();
+    }
+    window::setBorderless(borderless);
+    output["success"] = true;
+    return output;
+}
+
 json getPosition(const json &input) {
     json output;
     json posRes;
@@ -1248,77 +1554,10 @@ json getPosition(const json &input) {
     return output;
 }
 
-json init(const json &input) {
-    json output;
-
-    windowProps.sizeOptions = __jsonToSizeOptions(input, true);
-
-    if(helpers::hasField(input, "x"))
-        windowProps.x = input["x"].get<int>();
-
-    if(helpers::hasField(input, "y"))
-        windowProps.y = input["y"].get<int>();
-
-    if(helpers::hasField(input, "fullScreen"))
-        windowProps.fullScreen = input["fullScreen"].get<bool>();
-
-    if(helpers::hasField(input, "alwaysOnTop"))
-        windowProps.alwaysOnTop = input["alwaysOnTop"].get<bool>();
-
-    if(helpers::hasField(input, "title"))
-        windowProps.title = input["title"].get<string>();
-
-    if(helpers::hasField(input, "url"))
-        windowProps.url = input["url"].get<string>();
-
-    if(helpers::hasField(input, "icon"))
-        windowProps.icon = input["icon"].get<string>();
-
-    if(helpers::hasField(input, "extendUserAgentWith"))
-        windowProps.extendUserAgentWith = input["extendUserAgentWith"].get<string>();
-
-    if(helpers::hasField(input, "injectScript"))
-        windowProps.injectScript = input["injectScript"].get<string>();
-
-    if(helpers::hasField(input, "enableInspector"))
-        windowProps.enableInspector = input["enableInspector"].get<bool>();
-
-    if(helpers::hasField(input, "borderless"))
-        windowProps.borderless = input["borderless"].get<bool>();
-
-    if(helpers::hasField(input, "maximize"))
-        windowProps.maximize = input["maximize"].get<bool>();
-
-    if(helpers::hasField(input, "hidden"))
-        windowProps.hidden = input["hidden"].get<bool>();
-
-    if(helpers::hasField(input, "center"))
-        windowProps.center = input["center"].get<bool>();
-
-    if(helpers::hasField(input, "transparent"))
-        windowProps.transparent = input["transparent"].get<bool>();
-
-    if(helpers::hasField(input, "exitProcessOnClose"))
-        windowProps.exitProcessOnClose = input["exitProcessOnClose"].get<bool>();
-
-    if(helpers::hasField(input, "useSavedState"))
-        windowProps.useSavedState = input["useSavedState"].get<bool>();
-
-    if(helpers::hasField(input, "injectGlobals"))
-        windowProps.injectGlobals = input["injectGlobals"].get<bool>();
-
-    if(helpers::hasField(input, "injectClientLibrary"))
-        windowProps.injectClientLibrary = input["injectClientLibrary"].get<bool>();
-
-    __createWindow();
-    output["success"] = true;
-    return output;
-}
-
 json snapshot(const json &input) {
     json output;
     if (!helpers::hasRequiredFields(input, {"path"})) {
-        output["error"] = errors::makeMissingArgErrorPayload();
+        output["error"] = errors::makeMissingArgErrorPayload("path");
         return output;
     }
 
@@ -1340,6 +1579,50 @@ json setMainMenu(const json &input) {
     output["success"] = true;
     return output;
 }
+
+
+json beginDrag(const json &input) {
+    json output;
+    
+    #if defined(_WIN32)
+    nativeWindow->dispatch([&]() { beginDragNative(); });
+    #elif defined(__linux__) || defined(__FreeBSD__) || defined(__APPLE__)
+    window::beginDragNative();
+    #endif
+
+    output["success"] = true;
+    return output;
+}
+
+json print(const json &input) {
+    json output;
+
+    #if defined(__linux__) || defined(__FreeBSD__)
+    void *dlib = nativeWindow->dl();
+    webkit_print_operation_new_func webkit_print_operation_new = (webkit_print_operation_new_func)(dlsym(dlib, "webkit_print_operation_new"));
+    webkit_print_operation_run_dialog_func webkit_print_operation_run_dialog = (webkit_print_operation_run_dialog_func)(dlsym(dlib, "webkit_print_operation_run_dialog"));
+    
+    WebKitPrintOperation *printOp = webkit_print_operation_new((WebKitWebView*)(nativeWindow->wv()));
+    webkit_print_operation_run_dialog((WebKitPrintOperation*)printOp, GTK_WINDOW(windowHandle));
+    
+    #elif defined(__APPLE__)
+    id sharedPrintInfo = ((id(*)(id, SEL))objc_msgSend)("NSPrintInfo"_cls,
+                                            "sharedPrintInfo"_sel);
+    id printInfo = ((id(*)(id, SEL, id))objc_msgSend)((id)nativeWindow->wv(),
+                                            "printOperationWithPrintInfo:"_sel, sharedPrintInfo);
+    ((void(*)(id, SEL, id, id, SEL, void(*)))objc_msgSend)(printInfo,
+        "runOperationModalForWindow:delegate:didRunSelector:contextInfo:"_sel, windowHandle, nullptr, nullptr, nullptr);  
+    #elif defined(_WIN32)
+    ICoreWebView2 *webview = (ICoreWebView2*)nativeWindow->wv();
+    nativeWindow->dispatch([=] {
+        webview->ExecuteScript(L"window.print()", nullptr);
+    });
+
+    #endif
+    output["success"] = true;
+    return output;
+}
+
 
 } // namespace controllers
 

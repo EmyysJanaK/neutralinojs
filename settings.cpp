@@ -72,7 +72,7 @@ bool init() {
             config = json::parse(fileReaderResult.data);
             options = config;
         }
-        catch(exception e) {
+        catch(const exception& e) {
             debug::log(debug::LogTypeError, errors::makeErrorMsg(errors::NE_CF_UNBPRCF, string(configFile)));
             return false;
         }
@@ -200,9 +200,23 @@ void setGlobalArgs(const json &args) {
                 appPath = fs::getCurrentDirectory();
         }
 
-        // Resources read mode (resources.neu or from directory)
+        // DEPRECATED: Resources read mode (resources.neu or from directory)
         if(cliArg.key == "--load-dir-res") {
             resources::setMode(resources::ResourceModeDir);
+            continue;
+        }
+
+        // Resource mode (resources.neu, from directory or embedded)
+        if(cliArg.key == "--res-mode") {
+            if (cliArg.value == "directory") {
+                resources::setMode(resources::ResourceModeDir);
+            }
+            else if (cliArg.value == "bundle") {
+                resources::setMode(resources::ResourceModeBundle);
+            }
+            else if (cliArg.value == "embedded") {
+                resources::setMode(resources::ResourceModeEmbedded);
+            }
             continue;
         }
 
@@ -220,7 +234,7 @@ void setGlobalArgs(const json &args) {
 
         // Enable dev tools connection (as an extension)
         // Not available for production (resources.neu-based) apps
-        if(cliArg.key == "--neu-dev-extension" && !resources::isBundleMode()) {
+        if(cliArg.key == "--neu-dev-extension" && !resources::isBundleMode() && !resources::isEmbeddedMode()) {
             extensions::loadOne("js.neutralino.devtools");
             continue;
         }
@@ -280,6 +294,7 @@ void applyConfigOverride(const settings::CliArg &arg) {
         {"--window-full-screen", {"/modes/window/fullScreen", "bool"}},
         {"--window-always-on-top", {"/modes/window/alwaysOnTop", "bool"}},
         {"--window-enable-inspector", {"/modes/window/enableInspector", "bool"}},
+        {"--window-open-inspector-on-startup", {"/modes/window/openInspectorOnStartup", "bool"}},
         {"--window-borderless", {"/modes/window/borderless", "bool"}},
         {"--window-maximize", {"/modes/window/maximize", "bool"}},
         {"--window-hidden", {"/modes/window/hidden", "bool"}},
@@ -287,6 +302,7 @@ void applyConfigOverride(const settings::CliArg &arg) {
         {"--window-maximizable", {"/modes/window/maximizable", "bool"}},
         {"--window-center", {"/modes/window/center", "bool"}},
         {"--window-transparent", {"/modes/window/transparent", "bool"}},
+        {"--window-skip-taskbar", {"/modes/window/skipTaskbar", "bool"}},
         {"--window-exit-process-on-close", {"/modes/window/exitProcessOnClose", "bool"}},
         {"--window-use-saved-state", {"/modes/window/useSavedState", "bool"}},
         {"--window-icon", {"/modes/window/icon", "string"}},
@@ -297,7 +313,8 @@ void applyConfigOverride(const settings::CliArg &arg) {
         // Chrome mode
         {"--chrome-width", {"/modes/chrome/width", "int"}},
         {"--chrome-height", {"/modes/chrome/height", "int"}},
-        {"--chrome-args", {"/modes/chrome/args", "string"}}
+        {"--chrome-args", {"/modes/chrome/args", "string"}},
+        {"--chrome-browser-binary", {"/modes/chrome/browserBinary", "string"}}
     };
 
     // Allows overriding from modes

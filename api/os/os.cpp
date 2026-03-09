@@ -24,8 +24,13 @@
 #if defined(__linux__) || defined(__FreeBSD__) || defined(__APPLE__)
 #include <unistd.h>
 extern char **environ;
+#endif
 
-#elif defined(_WIN32)
+#if defined(__APPLE__)
+#include <objc/objc-runtime.h>
+#endif
+
+#if defined(_WIN32)
 #define _WINSOCKAPI_
 #include <windows.h>
 #include <tchar.h>
@@ -278,9 +283,13 @@ vector<string> __extensionsToVector(const json &filters) {
     vector<string> filtersV = {};
     for (auto &filter: filters) {
         filtersV.push_back(filter["name"].get<string>());
+		const auto &exts = filter["extensions"];
         string extensions = "";
-        for (auto &extension: filter["extensions"]) {
-            extensions += "*." + extension.get<string>() + " ";
+        for (int i = 0; i < exts.size(); i++) {
+            extensions += "*." + exts[i].get<string>();
+			if (i + 1 < exts.size()) {
+				extensions += " ";
+			}
         }
         filtersV.push_back(extensions);
     }
@@ -290,7 +299,7 @@ vector<string> __extensionsToVector(const json &filters) {
 json execCommand(const json &input) {
     json output;
     if(!helpers::hasRequiredFields(input, {"command"})) {
-        output["error"] = errors::makeMissingArgErrorPayload();
+        output["error"] = errors::makeMissingArgErrorPayload("command");
         return output;
     }
     string command = input["command"].get<string>();
@@ -329,7 +338,7 @@ json execCommand(const json &input) {
 json spawnProcess(const json &input) {
     json output;
     if(!helpers::hasRequiredFields(input, {"command"})) {
-        output["error"] = errors::makeMissingArgErrorPayload();
+        output["error"] = errors::makeMissingArgErrorPayload("command");
         return output;
     }
     
@@ -358,8 +367,9 @@ json spawnProcess(const json &input) {
 
 json updateSpawnedProcess(const json &input) {
     json output;
-    if(!helpers::hasRequiredFields(input, {"id", "event"})) {
-        output["error"] = errors::makeMissingArgErrorPayload();
+    const auto missingRequiredField = helpers::missingRequiredField(input, {"id", "event"});
+    if(missingRequiredField) {
+        output["error"] = errors::makeMissingArgErrorPayload(missingRequiredField.value());
         return output;
     }
 
@@ -400,7 +410,7 @@ json getSpawnedProcesses(const json &input) {
 json getEnv(const json &input) {
     json output;
     if(!helpers::hasRequiredFields(input, {"key"})) {
-        output["error"] = errors::makeMissingArgErrorPayload();
+        output["error"] = errors::makeMissingArgErrorPayload("key");
         return output;
     }
     string key = input["key"].get<string>();
@@ -535,8 +545,9 @@ json showSaveDialog(const json &input) {
 
 json showNotification(const json &input) {
     json output;
-    if(!helpers::hasRequiredFields(input, {"title", "content"})) {
-        output["error"] = errors::makeMissingArgErrorPayload();
+    const auto missingRequiredField = helpers::missingRequiredField(input, {"title", "content"});
+    if(missingRequiredField) {
+        output["error"] = errors::makeMissingArgErrorPayload(missingRequiredField.value());
         return output;
     }
     string title = input["title"].get<string>();
@@ -554,20 +565,49 @@ json showNotification(const json &input) {
         {"QUESTION", pfd::icon::question}
     };
 
-    if(iconMap.find(icon) != iconMap.end()) {
-        pfd::notify(title, content, iconMap[icon]);
+    if(iconMap.find(icon) == iconMap.end()) {
+        output["error"] = errors::makeErrorPayload(errors::NE_OS_INVNOTA, icon);
+        return output;
+    }
+
+#if defined(__APPLE__)
+    // Check if running as App Bundle by checking bundleIdentifier
+    id bundle = ((id (*)(id, SEL))objc_msgSend)("NSBundle"_cls, "mainBundle"_sel);
+    id bundleId = ((id (*)(id, SEL))objc_msgSend)(bundle, "bundleIdentifier"_sel);
+
+    if (bundleId != nullptr) {
+        // App Bundle: Use native NSUserNotificationCenter
+        id notification = ((id (*)(id, SEL))objc_msgSend)("NSUserNotification"_cls, "new"_sel);
+
+        id nsTitle = ((id (*)(id, SEL, const char*))objc_msgSend)(
+            "NSString"_cls, "stringWithUTF8String:"_sel, title.c_str());
+        id nsContent = ((id (*)(id, SEL, const char*))objc_msgSend)(
+            "NSString"_cls, "stringWithUTF8String:"_sel, content.c_str());
+
+        ((void (*)(id, SEL, id))objc_msgSend)(notification, "setTitle:"_sel, nsTitle);
+        ((void (*)(id, SEL, id))objc_msgSend)(notification, "setInformativeText:"_sel, nsContent);
+
+        id notificationCenter = ((id (*)(id, SEL))objc_msgSend)(
+            "NSUserNotificationCenter"_cls, "defaultUserNotificationCenter"_sel);
+        ((void (*)(id, SEL, id))objc_msgSend)(
+            notificationCenter, "deliverNotification:"_sel, notification);
     }
     else {
-        output["error"] = errors::makeErrorPayload(errors::NE_OS_INVNOTA, icon);
+        // Not App Bundle: Fall back to osascript via pfd::notify
+        pfd::notify(title, content, iconMap[icon]);
     }
+#else
+    pfd::notify(title, content, iconMap[icon]);
+#endif
     output["success"] = true;
     return output;
 }
 
 json showMessageBox(const json &input) {
     json output;
-    if(!helpers::hasRequiredFields(input, {"title", "content"})) {
-        output["error"] = errors::makeMissingArgErrorPayload();
+    const auto missingRequiredField = helpers::missingRequiredField(input, {"title", "content"});
+    if(missingRequiredField) {
+        output["error"] = errors::makeMissingArgErrorPayload(missingRequiredField.value());
         return output;
     }
     string icon = "INFO";
@@ -713,6 +753,10 @@ json setTray(const json &input) {
                     "dataWithBytes:length:"_sel, iconData, iconDataStr.length());
 
         ((void (*)(id, SEL, id))objc_msgSend)(tray.icon, "initWithData:"_sel, nsIconData);
+
+        if(helpers::hasField(input, "useTemplateIcon") && input["useTemplateIcon"].get<bool>()) {
+            ((void (*)(id, SEL, BOOL))objc_msgSend)(tray.icon, "setTemplate:"_sel, YES);
+        }
         #endif
     }
 
@@ -737,7 +781,7 @@ json setTray(const json &input) {
 json open(const json &input) {
     json output;
     if(!helpers::hasRequiredFields(input, {"url"})) {
-        output["error"] = errors::makeMissingArgErrorPayload();
+        output["error"] = errors::makeMissingArgErrorPayload("url");
         return output;
     }
     string url = input["url"].get<string>();
@@ -749,7 +793,7 @@ json open(const json &input) {
 json getPath(const json &input) {
     json output;
     if(!helpers::hasRequiredFields(input, {"name"})) {
-        output["error"] = errors::makeMissingArgErrorPayload();
+        output["error"] = errors::makeMissingArgErrorPayload("name");
         return output;
     }
     string name = input["name"].get<string>();

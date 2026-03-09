@@ -103,7 +103,7 @@ string __convertPath(const string &path) {
 json getFiles(const json &input) {
     json output;
     json files = json::array();
-    if(resources::isBundleMode()) {
+    if(resources::isBundleMode() || resources::isEmbeddedMode()) {
         files = __getAllFiles();
     }
     else {
@@ -126,11 +126,11 @@ json getFiles(const json &input) {
 json getStats(const json &input) {
     json output;
     if(!helpers::hasRequiredFields(input, {"path"})) {
-        output["error"] = errors::makeMissingArgErrorPayload();
+        output["error"] = errors::makeMissingArgErrorPayload("path");
         return output;
     }
     string path = input["path"].get<string>();
-    if(resources::isBundleMode()) {
+    if(resources::isBundleMode() || resources::isEmbeddedMode()) {
         auto resStats = __getStats(path);
         if(resStats.first != -1) {
             json stats;
@@ -166,8 +166,9 @@ json getStats(const json &input) {
 
 json extractFile(const json &input) {
     json output;
-    if(!helpers::hasRequiredFields(input, {"path", "destination"})) {
-        output["error"] = errors::makeMissingArgErrorPayload();
+    const auto missingRequiredField = helpers::missingRequiredField(input, {"path", "destination"});
+    if(missingRequiredField) {
+        output["error"] = errors::makeMissingArgErrorPayload(missingRequiredField.value());
         return output;
     }
     string path = input["path"].get<string>();
@@ -176,7 +177,10 @@ json extractFile(const json &input) {
     if(resources::isBundleMode() && resources::extractFile(path, destination)) {
         output["success"] = true;
     }
-    else if(!resources::isBundleMode()) {
+    else if(resources::isEmbeddedMode() && resources::extractFile(path, destination)) {
+        output["success"] = true;
+    }
+    else if(resources::isDirMode()) {
         path = settings::joinAppPath(path);
         
         error_code ec;
@@ -200,14 +204,15 @@ json extractFile(const json &input) {
 
 json extractDirectory(const json &input) {
     json output;
-    if(!helpers::hasRequiredFields(input, {"path", "destination"})) {
-        output["error"] = errors::makeMissingArgErrorPayload();
+    const auto missingRequiredField = helpers::missingRequiredField(input, {"path", "destination"});
+    if(missingRequiredField) {
+        output["error"] = errors::makeMissingArgErrorPayload(missingRequiredField.value());
         return output;
     }
     string path = input["path"].get<string>();
     string destination = input["destination"].get<string>();
-    
-    if(resources::isBundleMode()) {
+
+    if(resources::isBundleMode() || resources::isEmbeddedMode()) {
         auto resPaths = __getFiles(path);
         for(const auto &resPath: resPaths) {
             string extractPath = resPath;
@@ -218,7 +223,7 @@ json extractDirectory(const json &input) {
         }
         output["success"] = true;
     }
-    else if(!resources::isBundleMode()) {
+    else if(resources::isDirMode()) {
         path = settings::joinAppPath(path);
         
         error_code ec;
@@ -242,7 +247,7 @@ json extractDirectory(const json &input) {
 json readFile(const json &input) {
     json output;
     if(!helpers::hasRequiredFields(input, {"path"})) {
-        output["error"] = errors::makeMissingArgErrorPayload();
+        output["error"] = errors::makeMissingArgErrorPayload("path");
         return output;
     }
     string path = input["path"].get<string>();
@@ -261,7 +266,7 @@ json readFile(const json &input) {
 json readBinaryFile(const json &input) {
     json output;
     if(!helpers::hasRequiredFields(input, {"path"})) {
-        output["error"] = errors::makeMissingArgErrorPayload();
+        output["error"] = errors::makeMissingArgErrorPayload("path");
         return output;
     }
     string path = input["path"].get<string>();

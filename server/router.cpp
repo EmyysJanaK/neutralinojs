@@ -30,6 +30,7 @@
 #include "api/server/server.h"
 #include "api/custom/custom.h"
 
+
 #if defined(__APPLE__)
 #include <dispatch/dispatch.h>
 #endif
@@ -67,13 +68,16 @@ map<string, router::NativeMethod> methodMap = {
     {"window.focus", window::controllers::focus},
     {"window.setIcon", window::controllers::setIcon},
     {"window.move", window::controllers::move},
+    {"window.beginDrag", window::controllers::beginDrag},
     {"window.center", window::controllers::center},
     {"window.setSize", window::controllers::setSize},
     {"window.getSize", window::controllers::getSize},
     {"window.getPosition", window::controllers::getPosition},
     {"window.setAlwaysOnTop", window::controllers::setAlwaysOnTop},
+    {"window.setBorderless", window::controllers::setBorderless},
     {"window.snapshot", window::controllers::snapshot},
     {"window.setMainMenu", window::controllers::setMainMenu},
+    {"window.print", window::controllers::print},
     // Neutralino.computer
     {"computer.getMemoryInfo", computer::controllers::getMemoryInfo},
     {"computer.getArch", computer::controllers::getArch},
@@ -82,7 +86,10 @@ map<string, router::NativeMethod> methodMap = {
     {"computer.getCPUInfo", computer::controllers::getCPUInfo},
     {"computer.getDisplays", computer::controllers::getDisplays},
     {"computer.getMousePosition", computer::controllers::getMousePosition},
-    // Neutralino.log
+    {"computer.setMousePosition", computer::controllers::setMousePosition},
+    {"computer.setMouseGrabbing", computer::controllers::setMouseGrabbing},
+    {"computer.sendKey", computer::controllers::sendKey},
+    // Neutralino.debug
     {"debug.log", debug::controllers::log},
     // Neutralino.filesystem
     {"filesystem.createDirectory", fs::controllers::createDirectory},
@@ -108,6 +115,9 @@ map<string, router::NativeMethod> methodMap = {
     {"filesystem.getPathParts", fs::controllers::getPathParts},
     {"filesystem.getPermissions", fs::controllers::getPermissions},
     {"filesystem.setPermissions", fs::controllers::setPermissions},
+    {"filesystem.getJoinedPath", fs::controllers::getJoinedPath},
+    {"filesystem.getNormalizedPath", fs::controllers::getNormalizedPath},
+    {"filesystem.getUnnormalizedPath", fs::controllers::getUnnormalizedPath},
     // Neutralino.os
     {"os.execCommand", os::controllers::execCommand},
     {"os.spawnProcess", os::controllers::spawnProcess},
@@ -126,7 +136,9 @@ map<string, router::NativeMethod> methodMap = {
     // Neutralino.storage
     {"storage.setData", storage::controllers::setData},
     {"storage.getData", storage::controllers::getData},
+    {"storage.removeData", storage::controllers::removeData},
     {"storage.getKeys", storage::controllers::getKeys},
+    {"storage.clear", storage::controllers::clear},
     // Neutralino.events
     {"events.broadcast", events::controllers::broadcast},
     // Neutralino.extensions
@@ -156,6 +168,7 @@ map<string, router::NativeMethod> methodMap = {
     // Neutralino.custom
     {"custom.getMethods", custom::controllers::getMethods},
     // {"custom.add", custom::controllers::add} // Sample custom method
+
 };
 
 map<string, router::NativeMethod> getMethodMap() {
@@ -198,6 +211,7 @@ router::NativeMessage executeNativeMethod(const router::NativeMessage &request) 
             // In macos, child threads cannot run UI logic
             if(nativeMethodId == "os.showMessageBox" ||
                 regex_match(nativeMethodId, regex("^window.*")) ||
+                regex_match(nativeMethodId, regex("^computer.*")) ||
                 nativeMethodId == "os.setTray") {
                 dispatch_sync(dispatch_get_main_queue(), ^{
                     apiOutput = (*nativeMethod)(request.data);
@@ -212,7 +226,7 @@ router::NativeMessage executeNativeMethod(const router::NativeMessage &request) 
             response.data = apiOutput;
             return response;
         }
-        catch(exception e){
+        catch(const exception& e){
             response.data["error"] = errors::makeErrorPayload(errors::NE_RT_NATRTER);
             return response;
         }

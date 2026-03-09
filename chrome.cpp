@@ -45,7 +45,7 @@ string __getDefaultChromeArgs() {
     "--use-mock-keychain";
 }
 
-string __findChrome() {
+string __findChrome(const json &input) {
     string chromePath = "";
     #if defined(__linux__)
     vector<string> chromeBins = {
@@ -81,6 +81,13 @@ string __findChrome() {
     };
     #endif
 
+    string browserBinaryKeyForOs = "browserBinary" + string(NEU_OS_NAME);
+    if(helpers::hasField(input, "browserBinary") || helpers::hasField(input, browserBinaryKeyForOs)) {
+        string customBin = helpers::hasField(input, browserBinaryKeyForOs) ? input[browserBinaryKeyForOs].get<string>() : 
+                                    input["browserBinary"].get<string>();
+        chromeBins.insert(chromeBins.begin(), fs::applyPathConstants(customBin));
+    }
+
     for(const string &cmd: chromeBins) {
         fs::FileStats stats = fs::getStats(cmd);
         if(stats.status == errors::NE_ST_OK && stats.entryType == fs::EntryTypeFile) {
@@ -93,11 +100,11 @@ string __findChrome() {
 
 void init(const json &input) {
 
-    string chromeCmd = __findChrome();
+    string chromeCmd = __findChrome(input);
 
     if(chromeCmd.empty()) {
         pfd::message("Unable to start Chrome mode",
-                        "You need to install Chrome browser to use the Neutralinojs chrome mode",
+                        "You need to install Google Chrome to run this Neutralinojs application",
                         pfd::choice::ok,
                         pfd::icon::error);
         std::exit(1);
